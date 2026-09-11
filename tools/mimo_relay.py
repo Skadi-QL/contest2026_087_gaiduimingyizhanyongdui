@@ -167,8 +167,10 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
           person_present / person_bbox[x,y,w,h 归一化] / phone_detected /
           phone_near_hand / head_pitch / head_yaw / hand_motion_score / confidence
 
-        本机模型没有头部姿态/手部运动量, 这两个字段置 0 (设备侧行为引擎
-        主要用 person/phone 判定; 若后续需要可让本机服务补)。
+        本机模型没有头部姿态/手部运动量。
+        头部姿态置 0; hand_motion_score 用作"玩手机"开关: 行为引擎要求
+        phone_motion > 0.3 才判 PLAYING_PHONE, 否则只判 GLANCING_PHONE。
+        客户要求"看手机也归为玩手机"(一刀切), 故 using_phone=true 时置 1.0。
         """
         persons = result.get("persons") or []
         img_shape = result.get("img_shape") or [0, 0]
@@ -189,14 +191,17 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
                     max(0.0, min(1.0, (y2 - y1) / img_h)),
                 ]
 
+        using_phone = bool(result.get("using_phone"))
+
         observation = {
             "person_present": bool(result.get("has_person")),
             "person_bbox": bbox_norm,
             "phone_detected": bool(result.get("phone")),
-            "phone_near_hand": bool(result.get("using_phone")),
+            "phone_near_hand": using_phone,
             "head_pitch": 0.0,
             "head_yaw": 0.0,
-            "hand_motion_score": 0.0,
+            # 一刀切: 判定使用手机即视为"玩手机" (行为引擎要求 >0.3)
+            "hand_motion_score": 1.0 if using_phone else 0.0,
             "confidence": float(result.get("confidence") or 0.0),
         }
 
