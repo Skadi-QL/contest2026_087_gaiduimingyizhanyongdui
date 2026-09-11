@@ -25,6 +25,7 @@ FOCUS AIoT - MiMo HTTPS 中继 (tools/mimo_relay.py)
 
 import base64
 import http.server
+import json
 import os
 import sys
 import urllib.error
@@ -45,6 +46,15 @@ MIMO_API_KEY = os.environ.get(
 # 中继访问令牌: 设备 Authorization: Bearer <RELAY_TOKEN>
 # 留空 = 不校验 (仅建议内网联调用)
 RELAY_TOKEN = os.environ.get("RELAY_TOKEN", "")
+
+# 本机手机使用检测服务 (G:/phone-use-detection, 见《手机使用检测服务-使用说明.md》)。
+# 设置后走本机模型 (推荐, 免费/快/隐私), 留空则回退 MiMo 云端。
+# 注意: 必须填运行检测服务那台电脑的**局域网 IP**, 不要用 127.0.0.1;
+#       且中继所在服务器要能访问到该 IP (同一局域网, 或做内网穿透/端口映射)。
+DETECT_URL = os.environ.get("DETECT_URL", "")
+
+# 本机检测服务超时 (首次请求加载模型约 2s, 之后 70~80ms/张)
+DETECT_TIMEOUT = float(os.environ.get("DETECT_TIMEOUT", "15"))
 
 PORT = int(os.environ.get("PORT", "8600"))
 
@@ -95,24 +105,113 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
             # 2.5 顺带存最新一帧供网页预览 (失败不影响识别转发)
             self._save_preview_frame(body)
 
-            # 3. 转发给 MiMo (https)
-            req = urllib.request.Request(
-                MIMO_URL,
-                data=body,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": "Bearer " + MIMO_API_KEY,
-                },
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=90) as resp:
-                    payload = resp.read()
-                    self._reply(resp.status, payload)
-            except urllib.error.HTTPError as e:
-                self._reply(e.code, e.read())
+            # 3. 识别: 优先本机检测服务 (DETECT_URL), 否则 MiMo 云端
+            if DETECT_URL:
+                jpeg = self._extract_jpeg(body)
+                if jpeg is None:
+                    self._reply(400, b'{"error":"no image in request body"}')
+                    return
+                result = self._detect_local(jpeg)
+                payload = self._to_openai_response(result)
+                self._reply(200, payload)
+            else:
+                req = urllib.request.Request(
+                    MIMO_URL,
+                    data=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer " + MIMO_API_KEY,
+                    },
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=90) as resp:
+                        self._reply(resp.status, resp.read())
+                except urllib.error.HTTPError as e:
+                    self._reply(e.code, e.read())
 
         except Exception as e:  # noqa: BLE001
             self._reply(502, ("{\"error\":\"relay: %s\"}" % e).encode())
+
+    def _detect_local(self, jpeg):
+        """把 JPEG 以 multipart/form-data 发给本机检测服务, 返回解析后的 JSON。
+
+        本机服务契约 (见《手机使用检测服务-使用说明.md》):
+          POST <DETECT_URL>  -F "file=@frame.jpg"
+          → {using_phone, has_person, confidence, reason,
+             phone:{bbox}, hand:{bbox}, persons:[{bbox}], img_shape:[h,w]}
+        """
+        boundary = "----focusaiotrelayboundary"
+        parts = []
+        parts.append(("--%s\r\n" % boundary).encode())
+        parts.append(b'Content-Disposition: form-data; name="file"; '
+                     b'filename="frame.jpg"\r\n')
+        parts.append(b"Content-Type: image/jpeg\r\n\r\n")
+        parts.append(jpeg)
+        parts.append(("\r\n--%s--\r\n" % boundary).encode())
+        payload = b"".join(parts)
+
+        req = urllib.request.Request(
+            DETECT_URL,
+            data=payload,
+            headers={"Content-Type":
+                     "multipart/form-data; boundary=" + boundary},
+        )
+        with urllib.request.urlopen(req, timeout=DETECT_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+
+    @staticmethod
+    def _to_openai_response(result):
+        """本机检测结果 → 设备期望的 OpenAI chat/completions 格式。
+
+        设备 perception.c 从 choices[0].message.content 里取 JSON, 字段:
+          person_present / person_bbox[x,y,w,h 归一化] / phone_detected /
+          phone_near_hand / head_pitch / head_yaw / hand_motion_score / confidence
+
+        本机模型没有头部姿态/手部运动量, 这两个字段置 0 (设备侧行为引擎
+        主要用 person/phone 判定; 若后续需要可让本机服务补)。
+        """
+        persons = result.get("persons") or []
+        img_shape = result.get("img_shape") or [0, 0]
+        img_h = float(img_shape[0]) or 0.0
+        img_w = float(img_shape[1]) or 0.0
+
+        # 人物框: 取第一个 person, 像素 [x1,y1,x2,y2] → 归一化 [x,y,w,h]
+        bbox_norm = [0.0, 0.0, 0.0, 0.0]
+        if persons and img_w > 0 and img_h > 0:
+            bb = persons[0].get("bbox") or []
+            if len(bb) >= 4:
+                x1, y1, x2, y2 = (float(bb[0]), float(bb[1]),
+                                  float(bb[2]), float(bb[3]))
+                bbox_norm = [
+                    max(0.0, min(1.0, x1 / img_w)),
+                    max(0.0, min(1.0, y1 / img_h)),
+                    max(0.0, min(1.0, (x2 - x1) / img_w)),
+                    max(0.0, min(1.0, (y2 - y1) / img_h)),
+                ]
+
+        observation = {
+            "person_present": bool(result.get("has_person")),
+            "person_bbox": bbox_norm,
+            "phone_detected": bool(result.get("phone")),
+            "phone_near_hand": bool(result.get("using_phone")),
+            "head_pitch": 0.0,
+            "head_yaw": 0.0,
+            "hand_motion_score": 0.0,
+            "confidence": float(result.get("confidence") or 0.0),
+        }
+
+        # 包成 OpenAI chat/completions 响应 (content 是 JSON 字符串)
+        envelope = {
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(observation, ensure_ascii=False),
+                },
+            }],
+        }
+        return json.dumps(envelope, ensure_ascii=False).encode("utf-8")
 
     def do_GET(self):
         # 网页预览路由 (POST 转发不受影响)
@@ -164,6 +263,17 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
         if end < 0:
             end = len(body)
         return body[start:end]
+
+    def _extract_jpeg(self, body):
+        """提取并解码出 JPEG 二进制 (供本机检测服务转发)。"""
+        b64 = self._extract_jpeg_b64(body)
+        if b64 is None:
+            return None
+        try:
+            data = base64.b64decode(b64)
+        except Exception:  # noqa: BLE001
+            return None
+        return data if len(data) >= 4 else None
 
     def _reply(self, code, payload, content_type="application/json",
                extra_headers=None):
