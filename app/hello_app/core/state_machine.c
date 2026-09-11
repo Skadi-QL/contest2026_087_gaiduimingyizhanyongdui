@@ -378,6 +378,16 @@ const session_stats_t *state_machine_get_stats(void)
   return &g_stats;
 }
 
+void state_machine_get_distraction_by_type(uint8_t out[4])
+{
+  if (out == NULL)
+    {
+      return;
+    }
+
+  memcpy(out, g_distraction_by_type, sizeof(g_distraction_by_type));
+}
+
 int state_machine_get_mode(void)
 {
   return g_mode;

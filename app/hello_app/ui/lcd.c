@@ -23,6 +23,12 @@
 #  define UI_ANIMATION_STEP_MS 100U
 #endif
 
+/* 报告屏上展示的网页地址 (ASCII 6px/字, 26 字 = 156px < 216px 可放下)。
+ * 实际报告上传端点见 ui/mimo.c 的 REPORT_API_URL, 两者同主机。 */
+#ifndef REPORT_DISPLAY_URL
+#  define REPORT_DISPLAY_URL "106.15.192.201:8060/report"
+#endif
+
 enum ui_screen_e
 {
   UI_SCREEN_STATUS,
@@ -264,12 +270,8 @@ static const char *score_grade(uint8_t score)
   return "继续加油";
 }
 
-static void draw_advice_lines(ui_surface_t *surface, const char *advice)
-{
-  if (advice == NULL || advice[0] == '\0') advice = "建议获取中";
-  ui_text_wrap_center(surface, LCD_WIDTH / 2, 191, 216, 2, advice, 1,
-                      COLOR_TEXT);
-}
+/* 原先在报告屏直接排版长建议, 现改为提示"请看网页"(屏太小放不下),
+ * 建议正文由中继存入网页报告。保留此注释说明改动原因。 */
 
 static void render_report_locked(void)
 {
@@ -303,9 +305,12 @@ static void render_report_locked(void)
   ui_text(&g_ui.surface, 12, 138, line, 1, accent);
   draw_progress(&g_ui.surface, 12, 154, 214, 8,
                 clamp_score(report->stats.focus_score), 100, accent);
-  ui_text_center(&g_ui.surface, LCD_WIDTH / 2, 174, "MiMo 建议", 1,
+  /* 完整建议文本(含 MiMo 生成的正文)在网页报告页, 设备屏只有 240x240,
+   * 建议区最多约 2 行 x 18 字, 放不下, 故只给提示 + 网址。 */
+  ui_text_center(&g_ui.surface, LCD_WIDTH / 2, 178, "完整报告请见网页", 1,
                  COLOR_MUTED);
-  draw_advice_lines(&g_ui.surface, g_ui.advice);
+  ui_text_center(&g_ui.surface, LCD_WIDTH / 2, 198, REPORT_DISPLAY_URL, 1,
+                 COLOR_GREEN);
   ui_text_center(&g_ui.surface, LCD_WIDTH / 2, 229, "按开始键返回", 1,
                  COLOR_MUTED);
 }

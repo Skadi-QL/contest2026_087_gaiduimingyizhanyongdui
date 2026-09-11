@@ -55,6 +55,11 @@ device_status_t state_machine_get_status(void);
 /* 获取当前会话统计 (供 UI 查询)。 */
 const session_stats_t *state_machine_get_stats(void);
 
+/* 获取本局分心类型计数 (4 类, 索引见 api/session.h 的 distraction_type:
+ * 0=玩手机 1=看手机 2=离座 3=瞌睡)。
+ * 追加接口, 供学习报告上传使用; 不影响已有签名。 */
+void state_machine_get_distraction_by_type(uint8_t out[4]);
+
 /* 获取当前模式。 */
 int state_machine_get_mode(void);
 

@@ -31,6 +31,7 @@
 #include "api/behavior.h"
 #include "api/state_machine.h"
 #include "api/session.h"
+#include "api/mimo.h"
 #include "core/mock.h"
 
 /* ==================== 模块桩调用 (MVP mock) ==================== */
@@ -277,6 +278,24 @@ int main(int argc, char *argv[])
             {
                 frame_tick = 49;  /* 刚确认模式: 下一 tick (~100ms) 立即采首帧 */
             }
+
+            /* 一局结束 (进入 REPORT): 把统计上传中继, 由中继调 MiMo 生成
+             * 学习建议并存入网页报告 (/report 页)。设备屏只提示看网页。
+             * 放在主循环而非 state_machine_tick 内, 因为 HTTP 会阻塞数秒,
+             * 而 tick 要求 20ms 内返回。 */
+            if (st == DEVICE_REPORT && prev_status != DEVICE_REPORT)
+            {
+                session_report_t rep;
+                session_stats_t st_copy;
+
+                memset(&rep, 0, sizeof(rep));
+                st_copy = *state_machine_get_stats();
+                rep.stats = st_copy;
+                state_machine_get_distraction_by_type(rep.distraction_by_type);
+                mimo_get_advice(&rep.stats, rep.distraction_by_type,
+                                rep.advice, sizeof(rep.advice));
+            }
+
             prev_status = st;
 
             /* 每 50 tick (5s) 采一帧喂感知, 更新 history 供行为引擎 */

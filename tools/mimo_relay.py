@@ -28,6 +28,7 @@ import http.server
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -56,7 +57,51 @@ DETECT_URL = os.environ.get("DETECT_URL", "")
 # 本机检测服务超时 (首次请求加载模型约 2s, 之后 70~80ms/张)
 DETECT_TIMEOUT = float(os.environ.get("DETECT_TIMEOUT", "15"))
 
+# 学习报告: 设备一局结束 POST 统计到 /report, 中继调 MiMo 生成建议并存储,
+# 浏览器 GET /report 查看完整报告 (设备屏仅 240x240, 显示不下长文本)。
+REPORT_JSON_PATH = os.environ.get("REPORT_JSON_PATH", "/tmp/report.json")
+
+# 让 MiMo 生成建议的提示词 (要求纯文本正文, 便于网页直接展示)
+REPORT_PROMPT = (
+    "你是学习专注教练。根据下面这位学生的学习数据, 用中文写一段简短的反馈建议。"
+    "要求: 3到4句话, 120字以内; 先肯定做得好的地方, 再针对分心问题给出1条具体可执行的建议; "
+    "语气自然友好, 不要用markdown、不要标题、不要引号、不要表情符号, 直接输出正文。"
+)
+
 PORT = int(os.environ.get("PORT", "8600"))
+
+# 生成学习建议用的文字模型 (MiMo, OpenAI 兼容); 与应用层识图用的模型无关
+MIMO_MODEL = os.environ.get("MIMO_MODEL", "mimo-v2.5")
+
+
+def _at(seq, i):
+    """安全取序列第 i 项 (缺失返回 0)。"""
+    try:
+        return seq[i]
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _score_grade(score):
+    """专注度评分 → 等级文字 (与设备端 UI 一致)。"""
+    if score >= 90:
+        return "优秀"
+    if score >= 75:
+        return "良好"
+    if score >= 60:
+        return "及格"
+    return "需努力"
+
+
+def _local_advice(stats):
+    """MiMo 不可用时的兜底建议 (规则模板, 保证网页/设备总有内容)。"""
+    eff = int(stats.get("effective_min", 0))
+    score = int(stats.get("focus_score", 0))
+    if int(stats.get("mode_gentle", 0)) or stats.get("mode") == "gentle":
+        head = "你今天有效学习了 %d 分钟, 已经很棒了!" % eff
+    else:
+        head = "你坚持了 %d 分钟, 专注度 %d 分。" % (eff, score)
+    return head + "下次试着把手机放到伸手够不到的地方, 会更容易保持专注。"
 
 # 网页预览: 把设备 POST 来的最近一帧解码存盘, 浏览器 /preview 轮询查看。
 PREVIEW_JPEG_PATH = os.environ.get("PREVIEW_JPEG_PATH", "/tmp/preview.jpg")
@@ -87,6 +132,92 @@ setInterval(function(){ img.src = '/preview.jpg?t=' + Date.now(); }, 2000);
 </html>
 """
 
+# /report 页面: 完整学习报告 (统计数据 + MiMo 建议正文)。
+# 设备屏 240x240 只显示一行提示, 长文本在这里看。
+REPORT_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FOCUS AIoT 学习报告</title>
+<style>
+  body{margin:0;background:#0b1220;color:#eef4ff;
+       font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       display:flex;justify-content:center;padding:24px 16px}
+  .card{background:#131e30;border:1px solid #22304a;border-radius:14px;
+        max-width:640px;width:100%;padding:24px}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:#91a0b5;font-size:13px;margin-bottom:20px}
+  .score{font-size:44px;font-weight:700;line-height:1}
+  .grade{color:#00c853;font-size:15px;margin-left:8px}
+  .bar{height:8px;background:#22304a;border-radius:4px;margin:10px 0 22px;
+       overflow:hidden}
+  .bar>i{display:block;height:100%;background:#00c853}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;
+        margin-bottom:20px}
+  .cell{background:#0f1a2b;border-radius:10px;padding:12px}
+  .k{color:#91a0b5;font-size:12px}
+  .v{font-size:19px;font-weight:600;margin-top:4px}
+  h2{font-size:15px;margin:0 0 10px;color:#00c853}
+  .advice{background:#0f1a2b;border-left:3px solid #00c853;border-radius:8px;
+          padding:14px 16px;line-height:1.75;font-size:15px;white-space:pre-wrap}
+  .foot{color:#5d6b80;font-size:12px;margin-top:18px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>学习报告</h1>
+  <div class="sub" id="hdr">加载中...</div>
+  <div><span class="score" id="score">--</span><span class="grade" id="grade"></span></div>
+  <div class="bar"><i id="bar" style="width:0"></i></div>
+  <div class="grid">
+    <div class="cell"><div class="k">总时长</div><div class="v" id="total">--</div></div>
+    <div class="cell"><div class="k">有效学习</div><div class="v" id="effective">--</div></div>
+    <div class="cell"><div class="k">玩手机 / 看手机</div><div class="v" id="phone">--</div></div>
+    <div class="cell"><div class="k">离座 / 瞌睡</div><div class="v" id="away">--</div></div>
+  </div>
+  <h2>教练建议</h2>
+  <div class="advice" id="advice">加载中...</div>
+  <div class="foot" id="foot"></div>
+</div>
+<script>
+function fmt(sec){
+  var m = Math.floor(sec/60), s = sec%60;
+  if (m >= 60) { return Math.floor(m/60)+' 小时 '+(m%60)+' 分钟'; }
+  return m+' 分 '+s+' 秒';
+}
+function load(){
+  fetch('/report.json?t='+Date.now()).then(function(r){
+    if(!r.ok) throw new Error('no report');
+    return r.json();
+  }).then(function(d){
+    var s = d.stats || {};
+    document.getElementById('hdr').textContent =
+      (s.mode === 'gentle' ? '鼓励模式' : '严格模式') + ' · ' +
+      (d.generated_at || '');
+    document.getElementById('score').textContent = s.focus_score;
+    document.getElementById('grade').textContent = d.grade || '';
+    document.getElementById('bar').style.width = s.focus_score + '%';
+    document.getElementById('total').textContent = fmt(s.total_duration_sec);
+    document.getElementById('effective').textContent = fmt(s.effective_duration_sec);
+    var dbt = d.distraction_by_type || [0,0,0,0];
+    document.getElementById('phone').textContent = dbt[0]+' / '+dbt[1]+' 次';
+    document.getElementById('away').textContent  = dbt[2]+' / '+dbt[3]+' 次';
+    document.getElementById('advice').textContent = d.advice || '(暂无建议)';
+    document.getElementById('foot').textContent =
+      '分心合计 ' + (s.distraction_count||0) + ' 次';
+  }).catch(function(){
+    document.getElementById('hdr').textContent = '暂无报告 (完成一次学习后自动生成)';
+    document.getElementById('advice').textContent = '等待设备上传学习数据...';
+  });
+}
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>
+"""
+
 
 class RelayHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
@@ -101,6 +232,11 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
             # 2. 读设备发来的请求体 (OpenAI 兼容, 含 base64 图, 可能上百 KB)
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
+
+            # 2.1 学习报告: 设备一局结束上传统计 → MiMo 生成建议 → 存网页
+            #     (路径用 /report; 其余路径一律按识图处理)
+            if self.path.split("?")[0] == "/report":
+                return self._handle_report(body)
 
             # 2.5 顺带存最新一帧供网页预览 (失败不影响识别转发)
             self._save_preview_frame(body)
@@ -131,6 +267,86 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
 
         except Exception as e:  # noqa: BLE001
             self._reply(502, ("{\"error\":\"relay: %s\"}" % e).encode())
+
+    def _handle_report(self, body):
+        """设备上传学习统计 → 调 MiMo 生成建议 → 存 /tmp/report.json 供网页。
+
+        设备请求体 (见 ui/mimo.c):
+          {"total_min":N,"effective_min":N,"distractions":[a,b,c,d],
+           "focus_score":N,"mode":"strict|gentle"}
+        """
+        try:
+            stats = json.loads(body.decode("utf-8", "replace"))
+        except Exception as e:  # noqa: BLE001
+            return self._reply(400, ("{\"error\":\"bad report json: %s\"}" % e)
+                               .encode())
+
+        advice = self._generate_advice(stats)
+        report = {
+            "stats": {
+                # 网页统一用秒, 设备上报的是分钟
+                "total_duration_sec": int(stats.get("total_min", 0)) * 60,
+                "effective_duration_sec": int(stats.get("effective_min", 0)) * 60,
+                "distraction_count": sum(stats.get("distractions") or [0, 0, 0, 0]),
+                "focus_score": int(stats.get("focus_score", 0)),
+                "current_mode": 0 if stats.get("mode") == "strict" else 1,
+                "mode": stats.get("mode", "strict"),
+            },
+            "distraction_by_type": stats.get("distractions") or [0, 0, 0, 0],
+            "advice": advice,
+            "grade": _score_grade(int(stats.get("focus_score", 0))),
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        try:
+            tmp = REPORT_JSON_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(report, f, ensure_ascii=False)
+            os.replace(tmp, REPORT_JSON_PATH)
+            print("[relay] report saved (score=%s, advice %d chars)"
+                  % (report["stats"]["focus_score"], len(advice)))
+        except Exception as e:  # noqa: BLE001
+            print("[relay] report save failed: %s" % e)
+
+        self._reply(200, json.dumps({"ok": True, "advice": advice},
+                                    ensure_ascii=False).encode())
+
+    def _generate_advice(self, stats):
+        """调 MiMo (OpenAI 兼容) 生成中文建议; 失败则用本地模板兜底。"""
+        d = stats.get("distractions") or [0, 0, 0, 0]
+        user_text = (
+            "学习数据: 总时长 %s 分钟, 有效学习 %s 分钟, "
+            "分心次数 玩手机 %s 次 / 看手机 %s 次 / 离座 %s 次 / 瞌睡 %s 次, "
+            "专注度评分 %s 分 (满分100), 模式 %s。"
+            % (stats.get("total_min", 0), stats.get("effective_min", 0),
+               _at(d, 0), _at(d, 1), _at(d, 2), _at(d, 3),
+               stats.get("focus_score", 0),
+               "严格" if stats.get("mode") == "strict" else "鼓励")
+        )
+        req_body = json.dumps({
+            "model": MIMO_MODEL,
+            "max_completion_tokens": 512,
+            "messages": [
+                {"role": "system", "content": "You are MiMo, an AI assistant "
+                                              "developed by Xiaomi."},
+                {"role": "user", "content": REPORT_PROMPT + "\n\n" + user_text},
+            ],
+        }).encode()
+
+        try:
+            req = urllib.request.Request(
+                MIMO_URL, data=req_body,
+                headers={"Content-Type": "application/json",
+                         "Authorization": "Bearer " + MIMO_API_KEY})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            content = (data["choices"][0]["message"].get("content") or "").strip()
+            if content:
+                return content
+            print("[relay] MiMo 建议为空 (可能推理占满 token), 用模板兜底")
+        except Exception as e:  # noqa: BLE001
+            print("[relay] MiMo 建议生成失败: %s" % e)
+        return _local_advice(stats)
 
     def _detect_local(self, jpeg):
         """把 JPEG 以 multipart/form-data 发给本机检测服务, 返回解析后的 JSON。
@@ -219,14 +435,31 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
         return json.dumps(envelope, ensure_ascii=False).encode("utf-8")
 
     def do_GET(self):
-        # 网页预览路由 (POST 转发不受影响)
-        if self.path == "/preview":
+        # 网页路由 (POST 转发不受影响)。路径可能带 ?t= 缓存参数, 故按前缀匹配。
+        path = self.path.split("?")[0]
+        if path == "/preview":
             self._reply(200, PREVIEW_PAGE.encode(),
                         content_type="text/html; charset=utf-8")
-        elif self.path == "/preview.jpg":
+        elif path == "/preview.jpg":
             self._serve_preview_jpeg()
+        elif path == "/report":
+            self._reply(200, REPORT_PAGE.encode(),
+                        content_type="text/html; charset=utf-8")
+        elif path == "/report.json":
+            self._serve_report_json()
         else:
             self._reply(404, b'{"error":"not found"}')
+
+    def _serve_report_json(self):
+        try:
+            with open(REPORT_JSON_PATH, "rb") as f:
+                payload = f.read()
+            self._reply(200, payload,
+                        extra_headers={"Cache-Control": "no-store"})
+        except FileNotFoundError:
+            self._reply(404, b'{"error":"no report yet"}')
+        except OSError as e:
+            self._reply(500, ("{\"error\":\"report io: %s\"}" % e).encode())
 
     def _serve_preview_jpeg(self):
         try:
@@ -295,8 +528,21 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    print("[relay] MiMo 中继监听 0.0.0.0:%d -> %s" % (PORT, MIMO_URL))
-    print("[relay] 网页预览: http://<本机IP>:%d/preview" % PORT)
+    # 输出重定向到文件时 Python 默认块缓冲, 启动配置/请求日志会迟迟不落盘。
+    # 改为行缓冲, 便于 tail -f 实时观察。
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+    print("[relay] 中继监听 0.0.0.0:%d" % PORT)
+    print("[relay]   识图: %s" % (DETECT_URL if DETECT_URL
+                                  else "MiMo 云端 " + MIMO_URL))
+    print("[relay]   建议: MiMo %s (模型 %s)" % (MIMO_URL, MIMO_MODEL))
+    print("[relay]   网页: http://<本机IP>:%d/preview  (实时画面)" % PORT)
+    print("[relay]         http://<本机IP>:%d/report   (学习报告)" % PORT)
+    if not MIMO_API_KEY:
+        print("[relay] 警告: 未设置 MIMO_API_KEY, 学习建议将用本地模板兜底")
     if RELAY_TOKEN:
         print("[relay] 已启用访问令牌校验 (设备需带 Authorization)")
     else:
