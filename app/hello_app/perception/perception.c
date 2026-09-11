@@ -272,35 +272,53 @@ void perception_debounce_compute(observation_t *out, uint32_t ts)
 
 #ifndef PERCEPTION_MOCK
 
+/* 识图请求暂存缓冲: 一次分配、反复复用。
+ * 原先每帧 malloc/free b64+img+req 约 250KB, 加上 rgb565_to_jpeg 的
+ * 230KB, 每帧近 480KB 的分配/释放会造成堆碎片; 严重时分配器会复用
+ * CPU1 IDLE 栈所在的堆块 (该栈由堆分配, 位于堆起始处), 图像数据写进去
+ * 导致 CPU1 崩溃 (EPC1=0, 栈被高熵数据填满)。改为一次性大缓冲,
+ * 彻底消除每帧堆抖动。 */
+#define DETECT_SCRATCH_BYTES  (512 * 1024)   /* base64 / 请求体各自的上限 */
+
+static char  *g_b64_buf;      /* base64 编码输出 (复用) */
+static size_t g_b64_cap;
+static char  *g_req_buf;      /* 请求体 (复用) */
+static size_t g_req_cap;
+
+/* 按需扩大并返回复用缓冲 (只增不减, 不每帧 free) */
+static char *scratch_get(char **buf, size_t *cap, size_t need)
+{
+    if (*buf != NULL && *cap >= need) {
+        return *buf;
+    }
+    if (need > DETECT_SCRATCH_BYTES) {
+        return NULL;                        /* 异常大的图, 拒绝 */
+    }
+    free(*buf);
+    *buf = malloc(need);
+    *cap = (*buf != NULL) ? need : 0;
+    return *buf;
+}
+
 static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
 {
-    /* 1. Base64 编码 (b64 ≈ 4/3 原图大小, 用堆/PSRAM 避免挤爆小栈) */
+    /* 1. Base64 编码 (b64 ≈ 4/3 原图大小) */
     size_t b64_cap = perception_base64_encoded_len(jpeg_len) + 1;
-    char *b64 = malloc(b64_cap);
-    if (!b64) {
+    char *b64 = scratch_get(&g_b64_buf, &g_b64_cap, b64_cap);
+    if (b64 == NULL) {
         return FOCUS_ERR_PERCEP_PARAM;
     }
     size_t b64_len = perception_base64_encode(jpeg, jpeg_len, b64, b64_cap);
     if (b64_len == 0) {
-        free(b64);
         return FOCUS_ERR_PERCEP_PARAM;
     }
 
     /* 2. 构造 OpenAI chat/completions 请求体:
      *    model + messages(system + user[image_url base64, text prompt]) */
     size_t img_len = strlen("data:image/jpeg;base64,") + b64_len;
-    char *img = malloc(img_len + 1);
-    if (!img) {
-        free(b64);
-        return FOCUS_ERR_PERCEP_PARAM;
-    }
-    snprintf(img, img_len + 1, "data:image/jpeg;base64,%s", b64);
-    free(b64);
-
     size_t req_cap = img_len + sizeof(MIMO_PROMPT) + 256;
-    char *req = malloc(req_cap);
-    if (!req) {
-        free(img);
+    char *req = scratch_get(&g_req_buf, &g_req_cap, req_cap);
+    if (req == NULL) {
         return FOCUS_ERR_PERCEP_PARAM;
     }
     snprintf(req, req_cap,
@@ -309,19 +327,17 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
              "{\"role\":\"system\",\"content\":\"You are MiMo, an AI assistant "
              "developed by Xiaomi.\"},"
              "{\"role\":\"user\",\"content\":["
-             "{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}},"
+             "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,%s\"}},"
              "{\"type\":\"text\",\"text\":\"%s\"}]}]}",
-             MIMO_MODEL, img, MIMO_PROMPT);
-    free(img);
+             MIMO_MODEL, b64, MIMO_PROMPT);
 
-    /* 3. HTTP POST: 单次超时由 wifi_http_post 保证 ≤3s;
-     *    失败重试 1 次, 总阻塞 ≤6s (满足开发规范约束) */
+    /* 3. HTTP POST: 单次超时由 wifi_http_post 保证;
+     *    失败重试 1 次 */
     int ret = wifi_http_post(g_api_url, req, g_resp, sizeof(g_resp));
     if (ret < 0) {
         printf("[percep] 识图 HTTP 首发失败 ret=%d, 重试...\n", ret);
         ret = wifi_http_post(g_api_url, req, g_resp, sizeof(g_resp));
     }
-    free(req);
     if (ret < 0) {
         printf("[percep] 识图 HTTP 失败 ret=%d\n", ret);
         return FOCUS_ERR_PERCEP_TIMEOUT;

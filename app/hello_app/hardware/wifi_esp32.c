@@ -37,6 +37,11 @@
  * 放宽到 60s 避免响应稍慢就误判超时 */
 #define HTTP_TIMEOUT_SEC  60
 
+/* 请求体分块发送: 每块字节数 / 块间让出微秒 (见 wifi_http_post 注释)。
+ * 80KB 一次 send 会耗尽 WiFi TX 帧缓冲并导致 HPWORK 崩溃。 */
+#define HTTP_SEND_CHUNK   2048
+#define HTTP_SEND_GAP_US  2000
+
 /* HTTP 请求鉴权 Key (Authorization: Bearer), wifi_set_http_auth 设置 */
 static char g_http_api_key[80];
 
@@ -318,8 +323,7 @@ int wifi_http_post(const char *url, const char *body,
             return FOCUS_ERR_PARAM;
           }
 
-        if (send(sock, req, req_len, 0) < 0 ||
-            send(sock, body, strlen(body), 0) < 0)
+        if (send(sock, req, req_len, 0) < 0)
           {
             close(sock);
             if (attempt == 0)
@@ -328,6 +332,48 @@ int wifi_http_post(const char *url, const char *body,
               }
             return FOCUS_ERR_NET_DISCONN;
           }
+
+        /* 请求体 (base64 图, 可达 80KB+) 分块发送, 每块后短暂让出。
+         * 一次性 send 80KB 会把 WiFi 发送路径的帧缓冲 (esf_buf) 一次耗尽,
+         * 驱动在 esf_buf_alloc_dynamic 拿到坏指针后写入非法地址,
+         * 导致 HPWORK 任务 StoreProhibited 崩溃 (真机实测)。 */
+        {
+          size_t body_len = strlen(body);
+          size_t sent = 0;
+
+          while (sent < body_len)
+            {
+              size_t chunk = body_len - sent;
+              ssize_t w;
+
+              if (chunk > HTTP_SEND_CHUNK)
+                {
+                  chunk = HTTP_SEND_CHUNK;
+                }
+
+              w = send(sock, body + sent, chunk, 0);
+              if (w <= 0)
+                {
+                  break;
+                }
+
+              sent += (size_t)w;
+              if (sent < body_len)
+                {
+                  usleep(HTTP_SEND_GAP_US);   /* 让 WiFi TX 队列排空 */
+                }
+            }
+
+          if (sent < body_len)
+            {
+              close(sock);
+              if (attempt == 0)
+                {
+                  continue;
+                }
+              return FOCUS_ERR_NET_DISCONN;
+            }
+        }
       }
 
       /* 循环读响应直至连接关闭 (Connection: close), 避免大响应被截断 */
