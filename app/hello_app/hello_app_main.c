@@ -235,7 +235,7 @@ int main(int argc, char *argv[])
     printf("    ui             - 郭黄亦昕 (已集成)\n");
     printf("    behavior       - 赵思涵时序引擎\n");
     printf("    button/audio/camera/wifi - 张沐泽真实驱动\n");
-    printf("    perception     - 周礼航感知 (mock 或真实 MiMo)\n");
+    printf("    perception     - 周礼航感知 (mock 或真实识图服务)\n");
     printf("  子命令: hello_app hwbutton|hwaudio|hwcamera|hwwifi <ssid> <pass>\n");
     printf("==================================================\n\n");
 
