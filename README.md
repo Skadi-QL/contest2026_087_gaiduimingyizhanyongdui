@@ -63,9 +63,10 @@ FOCUS AIoT 是一台放在书桌上的**学习专注监测终端**。它用板�
 contest2026_087_gaiduimingyizhanyongdui/
 ├─ app/hello_app/            # 设备端应用（openvela 应用）
 │  ├─ api/                   # 团队冻结的跨模块接口
-│  ├─ core/                  # 状态机 FSM、会话统计、RGB565→JPEG 编码
+│  ├─ core/                  # 状态机 FSM、会话统计、图像编码、串口链路
 │  │  ├─ state_machine.c     #   4 状态：IDLE/MODE_SELECT/MONITORING/REPORT
-│  │  └─ rgb565_jpeg.c       #   TinyJPEG 编码（含 160×120 降采样）
+│  │  ├─ rgb565_jpeg.c       #   TinyJPEG 编码（含 160×120 降采样）
+│  │  └─ serial_link.c       #   USB 串口直传（备用链路，含校验重传）
 │  ├─ perception/            # 视觉感知：JPEG → 识图服务 → observation_t（3 帧去抖）
 │  ├─ behavior/              # 行为分析：observation 时序 → study_state_t（双模式阈值）
 │  ├─ ui/                    # LCD 页面渲染、中文字库、图标
@@ -75,6 +76,7 @@ contest2026_087_gaiduimingyizhanyongdui/
 │  └─ configs/hwtest/defconfig   # ← 本作品使用的 openvela 配置
 ├─ tools/
 │  ├─ mimo_relay.py          # 中转服务器：识图转发 + 学习报告 + 网页
+│  ├─ serial_bridge.py       # 电脑端串口桥接（备用链路，替代 WiFi）
 │  └─ generate_ui_cjk_font.py# 中文字库生成脚本
 ├─ logs/                     # AI Coding 对话日志
 ├─ 视觉模型README.md          # 视觉模型服务的完整说明（模型/阈值/接口/许可）
@@ -146,9 +148,11 @@ nsh> hello_app                                # 启动主程序
 
 | 操作 | 效果 |
 |---|---|
-| 长按 1–3 秒 | 进入模式选择（严格/鼓励） |
-| 短按 | 开始监测 / 切换模式 / 从报告页返回 |
-| 超长按 >3 秒 | 结束本次学习，进入报告页 |
+| **待机时长按** 1–3 秒 | 进入模式选择（严格/鼓励） |
+| **模式选择时长按** | **切换模式**（严格 ⇄ 鼓励） |
+| **模式选择时短按** | **确认进入监测** |
+| 监测中短按 / 超长按 >3 秒 | 结束本次学习，进入报告页 |
+| 报告页短按 | 返回待机 |
 
 > 只有**进入监测状态后**才采集与识图（IDLE/模式选择/报告页不采集）。
 
@@ -313,8 +317,8 @@ curl -s -m 8 http://127.0.0.1:8001/health
 |---|---|---|
 | `/v1/chat/completions` | POST | 设备识图请求（OpenAI 兼容）→ 转发视觉模型 → 转回设备格式 |
 | `/report` | POST | 设备上报学习统计 → 调 LLM 生成建议 → 存盘 |
-| `/report` | GET | 完整学习报告网页 |
-| `/report.json` | GET | 报告数据（网页 JS 拉取） |
+| `/report` | GET | 完整学习报告网页（**严格/鼓励两套建议，按钮切换**） |
+| `/report.json` | GET | 报告数据（网页 JS 拉取，含 `advice` 与 `advice_gentle`） |
 | `/preview` | GET | 摄像头实时预览网页 |
 | `/preview.jpg` | GET | 最新一帧画面 |
 
@@ -360,7 +364,53 @@ gcc -o /tmp/t_ui tests/test_ui.c ui/lcd.c ui/lcd_icons.c ui/mimo.c \
 
 完整对话日志见 `logs/` 目录。
 
-## 九、已知限制
+## 九、演示模式说明（Mock 范围）
+
+为了让作品在比赛现场**稳定演示**，演示固件中**视觉识别的"判断结果"使用预设序列**
+（`CONFIG_CONTEST2026_087_PERCEPTION_MOCK=y`）。**除此之外的环节全部为真实实现。**
+
+| 环节 | 演示时状态 |
+|---|---|
+| 摄像头采集（OV2640 / V4L2） | ✅ **真实** —— 串口可见真实字节数 |
+| JPEG 编码（TinyJPEG + 降采样） | ✅ **真实** —— 可见真实 JPEG 大小 |
+| 行为分析引擎（双模式阈值/优先级/冷却） | ✅ **真实** |
+| 状态机 FSM（4 状态流转） | ✅ **真实** |
+| 专注度评分 / 分心分类统计 | ✅ **真实** |
+| LCD 渲染 / 中文 / 双模式主题 / 图标 | ✅ **真实** |
+| 按键 / LED | ✅ **真实** |
+| 设备端学习报告 | ✅ **真实** |
+| **视觉识别结果** | ⚠️ **预设序列**（原因见下） |
+
+### 为什么
+
+排查发现：**openvela 在 ESP32-S3 上的 SMP 移植存在平台级内存损坏问题**。证据：
+
+- 崩溃多次发生在 **CPU1 IDLE** / **hpwork** 等无辜后台任务，`VADDR` 落在代码段或非法地址
+- **不连 WiFi 时完全不崩**；后续甚至**空转（不跑应用）也会崩**
+- 尝试过 6 种缓解方案（调大缓冲、降采样、分块发送、缓冲复用、socket 限流、串口直传）**均无法根治**
+- 关闭 SMP 会导致 **WiFi 驱动完全不可用**
+- 最终将缓冲配置**回退到默认值**后稳定性显著提升
+
+这是平台移植层的问题，超出应用层范围。我们选择**如实披露**并保留完整崩溃栈证据。
+
+### 视觉能力可独立验证
+
+视觉模型本身**完全可用**：现场可用 curl 调用本机模型服务验证真实检测结果：
+
+```bash
+curl --noproxy "*" -X POST http://<本机IP>:8000/detect -F "file=@photo.jpg"
+```
+
+### 备用链路：USB 串口直传
+
+针对 WiFi 通道的不稳定，我们还实现了**USB 串口直传**作为替代路径
+（`core/serial_link.c` + `tools/serial_bridge.py`）：设备经串口把图发给电脑，
+电脑推理后回写结果。含 Base64 编解码、分帧协议、**校验和重传**机制。
+打开 `CONFIG_CONTEST2026_087_PERCEPTION_SERIAL` 并在电脑上运行桥接脚本即可启用。
+
+---
+
+## 十、已知限制
 
 - **大请求体下的 WiFi 稳定性**：向 WiFi 发送路径一次性灌入过大请求体
   （>80KB base64）时，可能出现 `CPU1 IDLE` / `hpwork` 崩溃（ESP32-S3 SMP 与 WiFi
@@ -372,7 +422,7 @@ gcc -o /tmp/t_ui tests/test_ui.c ui/lcd.c ui/lcd_icons.c ui/mimo.c \
 - **视觉模型建议 GPU**：CPU 推理会明显变慢，建议用带 NVIDIA GPU 的机器。
 - **中继与前缀依赖**：演示时本机的视觉模型服务与 `frpc` 必须保持运行，否则识图失败。
 
-## 十、许可
+## 十一、许可
 
 - 本仓代码：参赛作品。
 - 手部模型 `NightingaleCen/YOLO26m-seg-hand`：AGPL-3.0。
