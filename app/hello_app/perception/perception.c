@@ -35,6 +35,7 @@
 
 #include "../api/perception.h"
 #include "perception_internal.h"
+#include "../core/serial_link.h"
 
 /* ======================================================================
  * 错误码统一使用 api/error.h (FOCUS_ERR_PERCEP_* = -30/-31/-32)
@@ -331,6 +332,19 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
              "{\"type\":\"text\",\"text\":\"%s\"}]}]}",
              MIMO_MODEL, b64, MIMO_PROMPT);
 
+#ifdef PERCEPTION_SERIAL
+    /* 3'. 串口直传: 把 JPEG 经 USB 串口发给上位机 (电脑) 识别并读回结果。
+     *     完全绕开 WiFi 发送路径 —— 设备经 WiFi 发大包会触发
+     *     openvela ESP32-S3 SMP 移植的驱动崩溃 (esf_buf_alloc_dynamic)。
+     *     上位机由 tools/serial_bridge.py 实现。 */
+    (void)req;   /* 串口模式不需要 OpenAI 请求体 */
+    if (serial_detect(jpeg, jpeg_len, g_resp, sizeof(g_resp)) < 0) {
+        printf("[percep] 识图串口失败/超时\n");
+        return FOCUS_ERR_PERCEP_TIMEOUT;
+    }
+    /* 上位机回传的同样是 OpenAI 兼容信封, 复用同一个解析器 */
+    return perception_parse_cloud_response(g_resp, raw);
+#else
     /* 3. HTTP POST: 单次超时由 wifi_http_post 保证;
      *    失败重试 1 次 */
     int ret = wifi_http_post(g_api_url, req, g_resp, sizeof(g_resp));
@@ -348,6 +362,7 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
 
     /* 4. 解析响应 → 云端原始结果 */
     return perception_parse_cloud_response(g_resp, raw);
+#endif
 }
 
 /* MiMo 响应解析 (OpenAI chat/completions 格式):
@@ -465,15 +480,32 @@ static observation_t mock_observation(int step)
     o.confidence   = 0.9f;
     o.timestamp_ms = perception_monotonic_ms();
 
-    switch (step % 4) {
-    case 0: /* FOCUSED */
+    /* 每个状态保持 MOCK_HOLD_FRAMES 帧 (帧间隔 5s), 以越过行为引擎的持续
+     * 时间阈值 (严格: 玩手机8s/离座10s/瞌睡8s; 鼓励: 15s/20s/12s)。
+     * 若每状态只 1 帧(5s), 则永远达不到阈值 —— 专注度与分心次数不会变化。 */
+#define MOCK_HOLD_FRAMES 5
+
+    /* 演示视觉模型**能识别**的状态: 专注 / 看手机 / 玩手机 / 离座。
+     * "离座" = 画面中无人, 模型可靠输出; "瞌睡"依赖姿态时序, 模型无法
+     * 可靠判定, 故不模拟 (设备仍保留其 UI 与逻辑)。 */
+    switch ((step / MOCK_HOLD_FRAMES) % 4) {
+    case 0: /* FOCUSED: 有人, 未用手机 */
         o.person_present = true;
         o.person_bbox[0] = 0.15f; o.person_bbox[1] = 0.10f;
         o.person_bbox[2] = 0.70f; o.person_bbox[3] = 0.85f;
         o.head_pitch = 0.0f;
         o.hand_motion_score = 0.10f;
         break;
-    case 1: /* PLAYING_PHONE */
+    case 1: /* GLANCING_PHONE: 检到手机但未在手中 */
+        o.person_present = true;
+        o.person_bbox[0] = 0.15f; o.person_bbox[1] = 0.10f;
+        o.person_bbox[2] = 0.70f; o.person_bbox[3] = 0.85f;
+        o.phone_detected  = true;
+        o.phone_near_hand = false;
+        o.head_pitch = -8.0f;
+        o.hand_motion_score = 0.05f;
+        break;
+    case 2: /* PLAYING_PHONE: 手机在手中 (手部运动量 > 0.3 才判玩手机) */
         o.person_present = true;
         o.person_bbox[0] = 0.15f; o.person_bbox[1] = 0.10f;
         o.person_bbox[2] = 0.70f; o.person_bbox[3] = 0.85f;
@@ -482,15 +514,8 @@ static observation_t mock_observation(int step)
         o.head_pitch = -25.0f;
         o.hand_motion_score = 0.60f;
         break;
-    case 2: /* AWAY */
+    default: /* AWAY: 画面中无人 (视觉模型可靠输出) */
         o.person_present = false;
-        break;
-    case 3: /* DROWSY */
-        o.person_present = true;
-        o.person_bbox[0] = 0.15f; o.person_bbox[1] = 0.10f;
-        o.person_bbox[2] = 0.70f; o.person_bbox[3] = 0.85f;
-        o.head_pitch = 55.0f;
-        o.hand_motion_score = 0.05f;
         break;
     }
     return o;

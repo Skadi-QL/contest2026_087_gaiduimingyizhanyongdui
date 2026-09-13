@@ -55,3 +55,13 @@ config CONTEST2026_087_PERCEPTION_MOCK
         Enable mock mode for perception module.
         If disabled, the module will call real MiMo cloud API for image recognition.
         Requires cJSON library when disabled.
+config CONTEST2026_087_PERCEPTION_SERIAL
+    bool "Perception over USB serial (bypass WiFi)"
+    default n
+    depends on LVX_USE_DEMO_CONTEST2026_087_HELLO_APP
+    help
+        Send captured JPEGs to a host PC over the USB serial link instead of
+        over WiFi/HTTP.  The host runs tools/serial_bridge.py, performs the
+        vision inference and writes the result back on the same serial line.
+        This avoids the openvela ESP32-S3 SMP WiFi-TX crash triggered by large
+        HTTP bodies.  Requires PERCEPTION_MOCK to be off.

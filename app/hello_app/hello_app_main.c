@@ -306,15 +306,12 @@ int main(int argc, char *argv[])
                 {
                     continue;  /* 非监测状态不采集 */
                 }
-#ifdef PERCEPTION_MOCK
-                /* mock: 假帧驱动 (perception 内部走 mock_observation) */
-                if (frame != NULL)
-                {
-                    memset(frame, 0, 64);
-                    perception_process(frame, 64, &obs);
-                }
-#else
-                /* 真实: 摄像头采集 RGB565 → 转 JPEG → MiMo 识图 */
+                /* 摄像头采集 RGB565 → 转 JPEG → 识图。
+                 * 这里恒定走**真实采集与编码** (演示/联调时能证明视觉链路是真
+                 * 在工作的: 串口会打印真实的采集字节数与 JPEG 大小)。
+                 * 是否真的调云端由 perception 内部的 PERCEPTION_MOCK 决定:
+                 * mock 模式下 perception_process 返回预设 observation 且不联网,
+                 * 因此不会触发 WiFi 发送路径上的平台级崩溃。 */
                 if (frame != NULL && jpeg_buf != NULL)
                 {
                     static unsigned cap_seq = 0;
@@ -333,7 +330,7 @@ int main(int argc, char *argv[])
                         if (rgb565_to_jpeg(frame, 320, 240,
                                            jpeg_buf, &jpeg_size) == 0)
                         {
-                            printf("[cam] #%u JPEG %uB -> 云端识图...\n",
+                            printf("[cam] #%u JPEG %uB -> 识图...\n",
                                    cap_seq, (unsigned)jpeg_size);
                             pret = perception_process(jpeg_buf, jpeg_size, &obs);
                             printf("[cam] #%u 识图返回=%d person=%d phone=%d "
@@ -356,7 +353,6 @@ int main(int argc, char *argv[])
                                cap_seq, cret, errno);
                     }
                 }
-#endif
             }
 
             usleep(100 * 1000);  /* 100ms = 10Hz */

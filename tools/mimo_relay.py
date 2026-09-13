@@ -61,11 +61,17 @@ DETECT_TIMEOUT = float(os.environ.get("DETECT_TIMEOUT", "15"))
 # 浏览器 GET /report 查看完整报告 (设备屏仅 240x240, 显示不下长文本)。
 REPORT_JSON_PATH = os.environ.get("REPORT_JSON_PATH", "/tmp/report.json")
 
-# 让 MiMo 生成建议的提示词 (要求纯文本正文, 便于网页直接展示)
-REPORT_PROMPT = (
-    "你是学习专注教练。根据下面这位学生的学习数据, 用中文写一段简短的反馈建议。"
-    "要求: 3到4句话, 120字以内; 先肯定做得好的地方, 再针对分心问题给出1条具体可执行的建议; "
-    "语气自然友好, 不要用markdown、不要标题、不要引号、不要表情符号, 直接输出正文。"
+# 让 MiMo 生成学习建议的提示词 —— 两种模式各一套, 风格差异明显, 便于对比展示。
+REPORT_PROMPT_STRICT = (
+    "你是严格的学习监督教练。根据下面的学习数据, 写一段 50 到 100 字的反馈。"
+    "要求: 直接点出最突出的问题(如玩手机次数多、专注度低), 语气坚定、就事论事、不绕弯子, "
+    "最后给出 1 条明确的改进要求。不要标题、不要markdown、不要引号、不要表情符号, 直接输出正文。"
+)
+
+REPORT_PROMPT_GENTLE = (
+    "你是温暖的学习陪伴教练。根据下面的学习数据, 写一段 50 到 100 字的反馈。"
+    "要求: 先具体肯定对方做得好的地方(如坚持的时长), 再温和地提出 1 条小建议, "
+    "语气亲切、给人信心, 像朋友在鼓励。不要标题、不要markdown、不要引号、不要表情符号, 直接输出正文。"
 )
 
 PORT = int(os.environ.get("PORT", "8600"))
@@ -93,11 +99,11 @@ def _score_grade(score):
     return "需努力"
 
 
-def _local_advice(stats):
+def _local_advice(stats, mode="strict"):
     """MiMo 不可用时的兜底建议 (规则模板, 保证网页/设备总有内容)。"""
     eff = int(stats.get("effective_min", 0))
     score = int(stats.get("focus_score", 0))
-    if int(stats.get("mode_gentle", 0)) or stats.get("mode") == "gentle":
+    if mode == "gentle":
         head = "你今天有效学习了 %d 分钟, 已经很棒了!" % eff
     else:
         head = "你坚持了 %d 分钟, 专注度 %d 分。" % (eff, score)
@@ -162,6 +168,14 @@ REPORT_PAGE = """<!DOCTYPE html>
   .advice{background:#0f1a2b;border-left:3px solid #00c853;border-radius:8px;
           padding:14px 16px;line-height:1.75;font-size:15px;white-space:pre-wrap}
   .foot{color:#5d6b80;font-size:12px;margin-top:18px}
+  .tabs{display:flex;gap:8px;margin-bottom:12px}
+  .tab{flex:1;padding:9px 0;border-radius:9px;cursor:pointer;font-size:14px;
+       background:#0f1a2b;color:#91a0b5;border:1px solid #22304a;
+       font-family:inherit;transition:.15s}
+  .tab:hover{color:#eef4ff}
+  .tab.active{background:#00c853;color:#04120a;border-color:#00c853;
+              font-weight:600}
+  #tab_gentle.active{background:#ffb300;border-color:#ffb300}
 </style>
 </head>
 <body>
@@ -177,6 +191,10 @@ REPORT_PAGE = """<!DOCTYPE html>
     <div class="cell"><div class="k">离座 / 瞌睡</div><div class="v" id="away">--</div></div>
   </div>
   <h2>教练建议</h2>
+  <div class="tabs">
+    <button class="tab active" id="tab_strict" onclick="pick('strict')">严格模式</button>
+    <button class="tab" id="tab_gentle" onclick="pick('gentle')">鼓励模式</button>
+  </div>
   <div class="advice" id="advice">加载中...</div>
   <div class="foot" id="foot"></div>
 </div>
@@ -185,6 +203,15 @@ function fmt(sec){
   var m = Math.floor(sec/60), s = sec%60;
   if (m >= 60) { return Math.floor(m/60)+' 小时 '+(m%60)+' 分钟'; }
   return m+' 分 '+s+' 秒';
+}
+var ADV = {strict:'', gentle:''}, CUR = 'strict';
+function pick(m){
+  CUR = m;
+  document.getElementById('tab_strict').className =
+    'tab' + (m === 'strict' ? ' active' : '');
+  document.getElementById('tab_gentle').className =
+    'tab' + (m === 'gentle' ? ' active' : '');
+  document.getElementById('advice').textContent = ADV[m] || '(暂无建议)';
 }
 function load(){
   fetch('/report.json?t='+Date.now()).then(function(r){
@@ -203,7 +230,9 @@ function load(){
     var dbt = d.distraction_by_type || [0,0,0,0];
     document.getElementById('phone').textContent = dbt[0]+' / '+dbt[1]+' 次';
     document.getElementById('away').textContent  = dbt[2]+' / '+dbt[3]+' 次';
-    document.getElementById('advice').textContent = d.advice || '(暂无建议)';
+    ADV.strict = d.advice || '';
+    ADV.gentle = d.advice_gentle || d.advice || '';
+    document.getElementById('advice').textContent = ADV[CUR] || '(暂无建议)';
     document.getElementById('foot').textContent =
       '分心合计 ' + (s.distraction_count||0) + ' 次';
   }).catch(function(){
@@ -217,6 +246,47 @@ setInterval(load, 5000);
 </body>
 </html>
 """
+
+
+def generate_advice(stats, mode="strict"):
+    """调 MiMo (OpenAI 兼容) 生成中文建议; 失败则用本地模板兜底。"""
+    d = stats.get("distractions") or [0, 0, 0, 0]
+    want = mode or stats.get("mode", "strict")
+    prompt = (REPORT_PROMPT_STRICT if want == "strict"
+              else REPORT_PROMPT_GENTLE)
+    user_text = (
+        "学习数据: 总时长 %s 分钟, 有效学习 %s 分钟, "
+        "分心次数 玩手机 %s 次 / 看手机 %s 次 / 离座 %s 次 / 瞌睡 %s 次, "
+        "专注度评分 %s 分 (满分100), 模式 %s。"
+        % (stats.get("total_min", 0), stats.get("effective_min", 0),
+           _at(d, 0), _at(d, 1), _at(d, 2), _at(d, 3),
+           stats.get("focus_score", 0),
+           "严格" if stats.get("mode") == "strict" else "鼓励")
+    )
+    req_body = json.dumps({
+        "model": MIMO_MODEL,
+        "max_completion_tokens": 512,
+        "messages": [
+            {"role": "system", "content": "You are MiMo, an AI assistant "
+                                          "developed by Xiaomi."},
+            {"role": "user", "content": prompt + "\n\n" + user_text},
+        ],
+    }).encode()
+
+    try:
+        req = urllib.request.Request(
+            MIMO_URL, data=req_body,
+            headers={"Content-Type": "application/json",
+                     "Authorization": "Bearer " + MIMO_API_KEY})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        content = (data["choices"][0]["message"].get("content") or "").strip()
+        if content:
+            return content
+        print("[relay] MiMo 建议为空 (可能推理占满 token), 用模板兜底")
+    except Exception as e:  # noqa: BLE001
+        print("[relay] MiMo 建议生成失败: %s" % e)
+    return _local_advice(stats, want)
 
 
 class RelayHandler(http.server.BaseHTTPRequestHandler):
@@ -281,7 +351,9 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
             return self._reply(400, ("{\"error\":\"bad report json: %s\"}" % e)
                                .encode())
 
-        advice = self._generate_advice(stats)
+        # 两种模式各生成一份建议 (网页上并列展示, 便于对比)
+        advice         = self._generate_advice(stats, "strict")
+        advice_gentle  = self._generate_advice(stats, "gentle")
         report = {
             "stats": {
                 # 网页统一用秒, 设备上报的是分钟
@@ -294,6 +366,7 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
             },
             "distraction_by_type": stats.get("distractions") or [0, 0, 0, 0],
             "advice": advice,
+            "advice_gentle": advice_gentle,
             "grade": _score_grade(int(stats.get("focus_score", 0))),
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -310,43 +383,6 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
 
         self._reply(200, json.dumps({"ok": True, "advice": advice},
                                     ensure_ascii=False).encode())
-
-    def _generate_advice(self, stats):
-        """调 MiMo (OpenAI 兼容) 生成中文建议; 失败则用本地模板兜底。"""
-        d = stats.get("distractions") or [0, 0, 0, 0]
-        user_text = (
-            "学习数据: 总时长 %s 分钟, 有效学习 %s 分钟, "
-            "分心次数 玩手机 %s 次 / 看手机 %s 次 / 离座 %s 次 / 瞌睡 %s 次, "
-            "专注度评分 %s 分 (满分100), 模式 %s。"
-            % (stats.get("total_min", 0), stats.get("effective_min", 0),
-               _at(d, 0), _at(d, 1), _at(d, 2), _at(d, 3),
-               stats.get("focus_score", 0),
-               "严格" if stats.get("mode") == "strict" else "鼓励")
-        )
-        req_body = json.dumps({
-            "model": MIMO_MODEL,
-            "max_completion_tokens": 512,
-            "messages": [
-                {"role": "system", "content": "You are MiMo, an AI assistant "
-                                              "developed by Xiaomi."},
-                {"role": "user", "content": REPORT_PROMPT + "\n\n" + user_text},
-            ],
-        }).encode()
-
-        try:
-            req = urllib.request.Request(
-                MIMO_URL, data=req_body,
-                headers={"Content-Type": "application/json",
-                         "Authorization": "Bearer " + MIMO_API_KEY})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read().decode("utf-8", "replace"))
-            content = (data["choices"][0]["message"].get("content") or "").strip()
-            if content:
-                return content
-            print("[relay] MiMo 建议为空 (可能推理占满 token), 用模板兜底")
-        except Exception as e:  # noqa: BLE001
-            print("[relay] MiMo 建议生成失败: %s" % e)
-        return _local_advice(stats)
 
     def _detect_local(self, jpeg):
         """把 JPEG 以 multipart/form-data 发给本机检测服务, 返回解析后的 JSON。
@@ -527,6 +563,43 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
         sys.stderr.write("[relay] %s\n" % (fmt % args))
 
 
+    # 是否在无报告时预置演示数据 (设 0 关闭)
+SEED_DEMO_REPORT = os.environ.get("SEED_DEMO_REPORT", "1") != "0"
+
+# 预置用的示例学习数据 (一局 45 分钟)
+DEMO_STATS = {
+    "total_min": 45, "effective_min": 38,
+    "distractions": [3, 2, 1, 0],          # 玩/看/离座/瞌睡
+    "focus_score": 72, "mode": "strict",
+}
+
+
+def _seed_demo_report():
+    """用预设数据生成两套建议并落盘, 供网页演示 (无需设备上传)。"""
+    stats = DEMO_STATS
+    report = {
+        "stats": {
+            "total_duration_sec": stats["total_min"] * 60,
+            "effective_duration_sec": stats["effective_min"] * 60,
+            "distraction_count": sum(stats["distractions"]),
+            "focus_score": stats["focus_score"],
+            "current_mode": 0,
+            "mode": stats["mode"],
+        },
+        "distraction_by_type": stats["distractions"],
+        "advice": generate_advice(stats, "strict"),
+        "advice_gentle": generate_advice(stats, "gentle"),
+        "grade": _score_grade(stats["focus_score"]),
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S") + " (演示数据)",
+    }
+    tmp = REPORT_JSON_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False)
+    os.replace(tmp, REPORT_JSON_PATH)
+    print("[relay] 已预置演示报告: 严格 %d 字 / 鼓励 %d 字"
+          % (len(report["advice"]), len(report["advice_gentle"])))
+
+
 def main():
     # 输出重定向到文件时 Python 默认块缓冲, 启动配置/请求日志会迟迟不落盘。
     # 改为行缓冲, 便于 tail -f 实时观察。
@@ -549,6 +622,14 @@ def main():
         print("[relay] 警告: 未设置 RELAY_TOKEN, 不校验来源")
     # 必须用多线程: 单线程 HTTPServer 在 MiMo 慢请求时无法 accept 新连接,
     # 内核接收队列积压满后直接丢弃 SYN (真机表现为连接超时 / 网络不通)。
+    # 预置演示报告: 设备未上传时网页也有内容 (评委打开就能看到).
+    # 删除 REPORT_JSON_PATH 即可重新生成; 设备真实上报后会被覆盖。
+    if SEED_DEMO_REPORT and not os.path.exists(REPORT_JSON_PATH):
+        try:
+            _seed_demo_report()
+        except Exception as e:  # noqa: BLE001
+            print("[relay] 预置演示报告失败: %s" % e)
+
     http.server.ThreadingHTTPServer(("0.0.0.0", PORT), RelayHandler).serve_forever()
 
 

@@ -1,6 +1,7 @@
 #include "../api/error.h"
 #include "../api/mimo.h"
 #include "../api/wifi.h"
+#include "../core/serial_link.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -68,9 +69,16 @@ int mimo_get_advice(session_stats_t *stats,
                stats->focus_score,
                stats->current_mode == 0 ? "strict" : "gentle");
 
+#ifdef PERCEPTION_SERIAL
+      /* 串口模式: 报告经 USB 串口交给上位机, 由其转投服务器生成建议。
+       * 设备不解析响应 (建议正文在网页上)。 */
+      (void)response;
+      (void)serial_send_report(request);
+#else
       /* 响应仅供中继记账, 设备不解析 (建议正文在网页上) */
       (void)wifi_http_post(REPORT_API_URL, request,
                            response, sizeof(response));
+#endif
     }
 
   local_advice(stats, advice_out, max_len);

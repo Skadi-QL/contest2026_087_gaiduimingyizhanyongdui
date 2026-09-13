@@ -5,7 +5,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 SIZE = 14
-CHARS = """待机长按开始键进入模式选择学习严格鼓励监督温暖陪伴切换确认有效分心次专注度已分钟报告总时明细玩手机看离座瞌睡良好建议获取中返回请回到位放下注意坐姿休息了就继续吧等你来哦要不要起来活动一下今天坚持减少会更棒加油完成稍后查看详细加载失败重新做得很优秀合格保持下次里程碑小时"""
+CHARS = """待机长按开始键进入模式选择学习严格鼓励监督温暖陪伴切换确认有效分心次专注度已分钟报告总时明细玩手机看离座瞌睡良好建议获取中返回请回到位放下注意坐姿休息了就继续吧等你来哦要不要起来活动一下今天坚持减少会更棒加油完成稍后查看详细加载失败重新做得很优秀合格保持下次里程碑小时整见网页"""
 
 
 def unique_chars(text: str) -> list[str]:
@@ -33,7 +33,11 @@ def glyph_rows(font: ImageFont.FreeTypeFont, char: str) -> list[int]:
 
 def main() -> None:
     repo = Path(__file__).resolve().parents[1]
-    font_path = Path(r"C:\Windows\Fonts\NotoSansSC-VF.ttf")
+    # 优先 Windows 字体; VM/CI 上用 Linux 的 Noto CJK
+    _cands = [Path(r"C:\Windows\Fonts\NotoSansSC-VF.ttf"),
+              Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+              Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc")]
+    font_path = next((c for c in _cands if c.exists()), _cands[0])
     output = repo / "app" / "hello_app" / "ui" / "ui_cjk_font.c"
     font = ImageFont.truetype(str(font_path), SIZE)
     entries = []

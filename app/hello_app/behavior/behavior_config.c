@@ -26,10 +26,12 @@ const char *gentle_messages[5] = {
 
 mode_config_t g_mode_configs[2] = {
     [MODE_STRICT] = {
-        .phone_glance_sec      = 8,
-        .phone_playing_sec     = 8,
-        .away_threshold_sec    = 10,
-        .drowsy_threshold_sec  = 8,
+        /* 阈值置 0: 状态一出现就立即计入并扣分 (演示要求"不用等待")。
+         * 冷却略大于单状态时长, 避免同一状态重复扣分。 */
+        .phone_glance_sec      = 0,
+        .phone_playing_sec     = 0,
+        .away_threshold_sec    = 0,
+        .drowsy_threshold_sec  = 0,
         .head_pitch_max        = 45,
         .remind_cooldown_sec   = 30,
         .remind_after_n_times  = 1,
@@ -42,13 +44,13 @@ mode_config_t g_mode_configs[2] = {
         .messages              = strict_messages,
     },
     [MODE_GENTLE] = {
-        .phone_glance_sec      = 15,
-        .phone_playing_sec     = 15,
-        .away_threshold_sec    = 20,
-        .drowsy_threshold_sec  = 12,
+        .phone_glance_sec      = 0,
+        .phone_playing_sec     = 0,
+        .away_threshold_sec    = 0,
+        .drowsy_threshold_sec  = 0,
         .head_pitch_max        = 52,
-        .remind_cooldown_sec   = 120,
-        .remind_after_n_times  = 3,
+        .remind_cooldown_sec   = 35,
+        .remind_after_n_times  = 1,
         .focus_milestone_min   = 30,
         .enable_milestone      = true,
         .score_penalty_phone   = -5,

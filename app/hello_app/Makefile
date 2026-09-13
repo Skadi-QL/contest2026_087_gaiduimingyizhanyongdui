@@ -13,6 +13,7 @@ MODULE    = $(CONFIG_LVX_USE_DEMO_CONTEST2026_087_HELLO_APP)
 
 MAINSRC = hello_app_main.c
 CSRCS = core/mock.c core/state_machine.c core/rgb565_jpeg.c \
+        core/serial_link.c \
         behavior/behavior.c behavior/behavior_config.c \
         ui/lcd.c ui/lcd_icons.c ui/mimo.c ui/ui_cjk_font.c ui/ui_draw.c \
         perception/perception.c
@@ -54,6 +55,11 @@ CFLAGS += ${INCDIR_PREFIX}$(TOPDIR)/arch/xtensa/src/esp32s3
 # perception mock 开关 (默认 mock, 关闭则走真实 MiMo 需 cJSON)
 ifeq ($(CONFIG_CONTEST2026_087_PERCEPTION_MOCK),y)
 CFLAGS += -DPERCEPTION_MOCK
+endif
+
+# 串口识图 (绕开 WiFi): 设备把图经 USB 串口发给上位机识别
+ifeq ($(CONFIG_CONTEST2026_087_PERCEPTION_SERIAL),y)
+CFLAGS += -DPERCEPTION_SERIAL
 endif
 
 include $(APPDIR)/Application.mk

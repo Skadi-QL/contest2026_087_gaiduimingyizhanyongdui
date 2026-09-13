@@ -300,7 +300,9 @@ void state_machine_tick(void)
         break;
 
       case DEVICE_MODE_SELECT:
-        if (btn == BTN_MODE)
+        /* 长按 = 切换模式; 短按 = 确认进入监测。
+         * (按键 1 的短/长按都已支持; 若板上有独立模式键, BTN_MODE 也可切) */
+        if (btn == BTN_START_LONGPRESS || btn == BTN_MODE)
           {
             toggle_mode();
           }
