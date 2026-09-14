@@ -73,7 +73,9 @@ contest2026_087_gaiduimingyizhanyongdui/
 │  ├─ hardware/              # 真实驱动：OV2640(V4L2)、WiFi、按键、音频、ST7789
 │  └─ tests/                 # 主机单元测试（UI/行为/感知）
 ├─ board/contest_board/      # 板级配置
-│  └─ configs/hwtest/defconfig   # ← 本作品使用的 openvela 配置
+│  └─ configs/
+│     ├─ hwtest/defconfig        # ← 真实版（视觉识别走真实模型）
+│     └─ hwtest-mock/defconfig   # ← 演示版（识别用预设序列，其余全真）
 ├─ tools/
 │  ├─ mimo_relay.py          # 中转服务器：识图转发 + 学习报告 + 网页
 │  ├─ serial_bridge.py       # 电脑端串口桥接（备用链路，替代 WiFi）
@@ -116,6 +118,22 @@ cd ..
 # 用本作品的板级配置编译（首次会拉依赖并全量编译，约 10-20 分钟）
 ./build.sh contest2026_087_gaiduimingyizhanyongdui/board/contest_board/configs/hwtest -j2
 ```
+
+**本仓提供两套板级配置，按需二选一**：
+
+| 配置 | 路径 | 视觉识别 | 用途 |
+|---|---|---|---|
+| **真实版** | `board/contest_board/configs/hwtest` | 真实调用视觉模型与 LLM | 完整功能验证 |
+| **演示版** | `board/contest_board/configs/hwtest-mock` | 预设序列（其余全真） | 现场稳定演示 |
+
+```bash
+# 演示版编译（把 hwtest 换成 hwtest-mock 即可）
+./build.sh contest2026_087_gaiduimingyizhanyongdui/board/contest_board/configs/hwtest-mock -j2
+```
+
+> 两者的差异只有一个 Kconfig：
+> `CONFIG_CONTEST2026_087_PERCEPTION_MOCK`（演示版 `=y`）。
+> 详见「九、演示模式说明」。
 
 产物：`nuttx/nuttx.bin`
 
@@ -392,6 +410,24 @@ gcc -o /tmp/t_ui tests/test_ui.c ui/lcd.c ui/lcd_icons.c ui/mimo.c \
 - 最终将缓冲配置**回退到默认值**后稳定性显著提升
 
 这是平台移植层的问题，超出应用层范围。我们选择**如实披露**并保留完整崩溃栈证据。
+
+### 两套配置并存
+
+| 配置 | 识别 | 说明 |
+|---|---|---|
+| `configs/hwtest`（**真实版**） | 真实调用模型 | 完整功能；需 WiFi + 服务器 + 本机模型服务就绪 |
+| `configs/hwtest-mock`（**演示版**） | 预设序列 | 自包含、无需联网；**其余环节全部真实** |
+
+**切换方式**：编译时换配置目录即可，**代码一行不改**：
+
+```bash
+./build.sh contest2026_087_gaiduimingyizhanyongdui/board/contest_board/configs/hwtest      -j2   # 真实
+./build.sh contest2026_087_gaiduimingyizhanyongdui/board/contest_board/configs/hwtest-mock -j2   # 演示
+```
+
+> ⚠️ 注意：这类只影响编译宏的配置变化，make **不一定会重编应用**。
+> 若切换后行为没变，请先删掉应用目标文件再编译：
+> `rm -f app/hello_app/*/*.o app/hello_app/*.o`
 
 ### 视觉能力可独立验证
 
