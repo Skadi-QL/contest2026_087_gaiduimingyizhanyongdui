@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "team_id": "contest2026_087_gaiduimingyizhanyongdui",
+  "github_login": "Skadi-QL",
+  "generator": "claude-code-collector@1.2.0",
+  "updated_at": "2026-09-14T15:26:13.466Z",
+  "sessions": [
+    {
+      "session_id": "1922c1ec-ec29-4fe4-a796-77c185b1f8e5",
+      "tool": "claude-code",
+      "started_at": "2026-09-14T15:26:13.205Z",
+      "last_event_at": "2026-09-14T15:26:13.205Z",
+      "event_count": 6045,
+      "raw_event_count": 10302,
+      "file_path": "logs/Skadi-QL/2026-09-14/claude-code__1922c1ec-ec29-4fe4-a796-77c185b1f8e5.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "deepseek-flash"
+    },
+    {
+      "session_id": "4297de6b-6ead-4baf-99e8-f4065127e5cf",
+      "tool": "claude-code",
+      "started_at": "2026-09-14T15:26:13.301Z",
+      "last_event_at": "2026-09-14T15:26:13.301Z",
+      "event_count": 3,
+      "raw_event_count": 6,
+      "file_path": "logs/Skadi-QL/2026-09-14/claude-code__4297de6b-6ead-4baf-99e8-f4065127e5cf.jsonl",
+      "collection_mode": "cli",
+      "health": "ok"
+    },
+    {
+      "session_id": "c5b96e71-165b-4e95-9386-41e58cdf85d2",
+      "tool": "claude-code",
+      "started_at": "2026-09-14T15:26:13.393Z",
+      "last_event_at": "2026-09-14T15:26:13.393Z",
+      "event_count": 191,
+      "raw_event_count": 282,
+      "file_path": "logs/Skadi-QL/2026-09-14/claude-code__c5b96e71-165b-4e95-9386-41e58cdf85d2.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "deepseek-v4-flash"
+    },
+    {
+      "session_id": "c6add457-73ee-4d21-b300-6024c5e32fd3",
+      "tool": "claude-code",
+      "started_at": "2026-09-14T15:26:13.466Z",
+      "last_event_at": "2026-09-14T15:26:13.466Z",
+      "event_count": 3,
+      "raw_event_count": 6,
+      "file_path": "logs/Skadi-QL/2026-09-14/claude-code__c6add457-73ee-4d21-b300-6024c5e32fd3.jsonl",
+      "collection_mode": "cli",
+      "health": "ok"
+    }
+  ]
+}
