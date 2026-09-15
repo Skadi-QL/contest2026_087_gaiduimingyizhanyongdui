@@ -3,19 +3,20 @@
   "team_id": "contest2026_087_gaiduimingyizhanyongdui",
   "github_login": "Skadi-QL",
   "generator": "claude-code-collector@1.2.0",
-  "updated_at": "2026-09-14T15:26:13.466Z",
+  "updated_at": "2026-09-15T16:34:56.960Z",
   "sessions": [
     {
       "session_id": "1922c1ec-ec29-4fe4-a796-77c185b1f8e5",
       "tool": "claude-code",
       "started_at": "2026-09-14T15:26:13.205Z",
-      "last_event_at": "2026-09-14T15:26:13.205Z",
-      "event_count": 6045,
-      "raw_event_count": 10302,
-      "file_path": "logs/Skadi-QL/2026-09-14/claude-code__1922c1ec-ec29-4fe4-a796-77c185b1f8e5.jsonl",
+      "last_event_at": "2026-09-15T16:34:56.958Z",
+      "event_count": 6282,
+      "raw_event_count": 10774,
+      "file_path": "logs/Skadi-QL/2026-09-15/claude-code__1922c1ec-ec29-4fe4-a796-77c185b1f8e5.jsonl",
       "collection_mode": "cli",
       "health": "ok",
-      "model": "deepseek-flash"
+      "model": "deepseek-flash",
+      "redacted_count_total": 12
     },
     {
       "session_id": "4297de6b-6ead-4baf-99e8-f4065127e5cf",
