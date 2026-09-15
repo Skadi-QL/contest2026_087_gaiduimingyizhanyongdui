@@ -16,6 +16,8 @@ FOCUS AIoT 是一台放在书桌上的**学习专注监测终端**。它用板�
   设备无需 TLS 栈、无需大算力。
 - **网页报告**：设备屏只有 240×240，长文本放不下 —— 完整学习报告（含 LLM 建议正文）
   在网页端呈现，设备屏只提示网址。
+- **编码卸载**：设备端不做 JPEG 编码（会占用 8KB 栈帧 + 230KB 缓冲 + 密集浮点），
+  只上传降采样后的原始 RGB565，编码由服务器完成 —— 把算力留给采集与交互。
 - **全链路可复现**：视觉模型、中转服务器、内网穿透、固件编译烧录，本文档给出从零步骤。
 
 ## 二、选题方向
@@ -29,17 +31,18 @@ FOCUS AIoT 是一台放在书桌上的**学习专注监测终端**。它用板�
 ## 三、系统架构
 
 ```
-┌──────────────┐  ① RGB565 采集
+┌──────────────┐  ① RGB565 采集 (320×240)
 │ ESP32-S3-EYE │──────────────┐
 │   openvela   │              ▼
-│              │       ② TinyJPEG 编码 (160×120 降采样)
+│              │       ② 2× 降采样 → 160×120 RGB565 (37.5KB)
 │ 摄像头/LCD/  │              ▼
-│ 按键/LED     │       ③ HTTP POST base64 图
+│ 按键/LED     │       ③ HTTP POST base64 图 (~51KB)
 └──────┬───────┘              ▼
        │              ┌─────────────────────┐
        │              │  中转服务器(公网)    │
        │              │  tools/mimo_relay.py│
        │              │  :8060              │
+       │              │  ★ RGB565 → JPEG    │  ← 编码在服务端
        │              └───┬─────────────┬───┘
        │  ⑤ LLM 建议       │             │ ④ 转发图片
        │                   ▼             ▼
@@ -54,8 +57,13 @@ FOCUS AIoT 是一台放在书桌上的**学习专注监测终端**。它用板�
                                 └────────────────────┘
 ```
 
-**为什么这么设计**：ESP32 固件没有 TLS 栈，无法直连 HTTPS 云端 API；视觉模型需要 GPU，
-跑在 PC 上。因此由中转服务器做协议转换与转发，并顺带提供网页报告。
+**为什么这么设计**：
+
+1. **编码放在服务端**：设备端做 JPEG 编码（TinyJPEG）会占用 8KB 栈帧、230KB 缓冲并做
+   密集浮点运算，实测会触发 openvela 在 ESP32-S3 上的稳定性问题。改为设备只上传
+   **降采样后的原始 RGB565**，由服务器用 PIL 转 JPEG —— 设备端零编码负担。
+2. **固件没有 TLS 栈**，无法直连 HTTPS 云端 API；视觉模型需要 GPU，跑在 PC 上。
+   因此由中转服务器做协议转换与转发，并顺带提供网页报告。
 
 ## 四、目录结构
 
@@ -65,7 +73,7 @@ contest2026_087_gaiduimingyizhanyongdui/
 │  ├─ api/                   # 团队冻结的跨模块接口
 │  ├─ core/                  # 状态机 FSM、会话统计、图像编码、串口链路
 │  │  ├─ state_machine.c     #   4 状态：IDLE/MODE_SELECT/MONITORING/REPORT
-│  │  ├─ rgb565_jpeg.c       #   TinyJPEG 编码（含 160×120 降采样）
+│  │  ├─ rgb565_jpeg.c       #   2× 降采样 + TinyJPEG 编码（服务端编码模式的备用）
 │  │  └─ serial_link.c       #   USB 串口直传（备用链路，含校验重传）
 │  ├─ perception/            # 视觉感知：JPEG → 识图服务 → observation_t（3 帧去抖）
 │  ├─ behavior/              # 行为分析：observation 时序 → study_state_t（双模式阈值）
@@ -73,9 +81,7 @@ contest2026_087_gaiduimingyizhanyongdui/
 │  ├─ hardware/              # 真实驱动：OV2640(V4L2)、WiFi、按键、音频、ST7789
 │  └─ tests/                 # 主机单元测试（UI/行为/感知）
 ├─ board/contest_board/      # 板级配置
-│  └─ configs/
-│     ├─ hwtest/defconfig        # ← 真实版（视觉识别走真实模型）
-│     └─ hwtest-mock/defconfig   # ← 演示版（识别用预设序列，其余全真）
+│  └─ configs/hwtest/defconfig   # ← 本作品使用的 openvela 配置
 ├─ tools/
 │  ├─ mimo_relay.py          # 中转服务器：识图转发 + 学习报告 + 网页
 │  ├─ serial_bridge.py       # 电脑端串口桥接（备用链路，替代 WiFi）
@@ -119,21 +125,12 @@ cd ..
 ./build.sh contest2026_087_gaiduimingyizhanyongdui/board/contest_board/configs/hwtest -j2
 ```
 
-**本仓提供两套板级配置，按需二选一**：
+**关键配置**（已在 `hwtest/defconfig` 中设置，无需手动改）：
 
-| 配置 | 路径 | 视觉识别 | 用途 |
-|---|---|---|---|
-| **真实版** | `board/contest_board/configs/hwtest` | 真实调用视觉模型与 LLM | 完整功能验证 |
-| **演示版** | `board/contest_board/configs/hwtest-mock` | 预设序列（其余全真） | 现场稳定演示 |
-
-```bash
-# 演示版编译（把 hwtest 换成 hwtest-mock 即可）
-./build.sh contest2026_087_gaiduimingyizhanyongdui/board/contest_board/configs/hwtest-mock -j2
-```
-
-> 两者的差异只有一个 Kconfig：
-> `CONFIG_CONTEST2026_087_PERCEPTION_MOCK`（演示版 `=y`）。
-> 详见「九、演示模式说明」。
+| Kconfig | 值 | 作用 |
+|---|---|---|
+| `CONFIG_CONTEST2026_087_PERCEPTION_RAW_RGB` | `y` | 设备端**不做 JPEG 编码**，上传原始 RGB565，由服务器转码 |
+| `CONFIG_CONTEST2026_087_PERCEPTION_MOCK` | 未启用 | 走真实视觉模型 |
 
 产物：`nuttx/nuttx.bin`
 
@@ -382,83 +379,18 @@ gcc -o /tmp/t_ui tests/test_ui.c ui/lcd.c ui/lcd_icons.c ui/mimo.c \
 
 完整对话日志见 `logs/` 目录。
 
-## 九、演示模式说明（Mock 范围）
+## 九、已知限制
 
-为了让作品在比赛现场**稳定演示**，演示固件中**视觉识别的"判断结果"使用预设序列**
-（`CONFIG_CONTEST2026_087_PERCEPTION_MOCK=y`）。**除此之外的环节全部为真实实现。**
-
-| 环节 | 演示时状态 |
-|---|---|
-| 摄像头采集（OV2640 / V4L2） | ✅ **真实** —— 串口可见真实字节数 |
-| JPEG 编码（TinyJPEG + 降采样） | ✅ **真实** —— 可见真实 JPEG 大小 |
-| 行为分析引擎（双模式阈值/优先级/冷却） | ✅ **真实** |
-| 状态机 FSM（4 状态流转） | ✅ **真实** |
-| 专注度评分 / 分心分类统计 | ✅ **真实** |
-| LCD 渲染 / 中文 / 双模式主题 / 图标 | ✅ **真实** |
-| 按键 / LED | ✅ **真实** |
-| 设备端学习报告 | ✅ **真实** |
-| **视觉识别结果** | ⚠️ **预设序列**（原因见下） |
-
-### 为什么
-
-排查发现：**openvela 在 ESP32-S3 上的 SMP 移植存在平台级内存损坏问题**。证据：
-
-- 崩溃多次发生在 **CPU1 IDLE** / **hpwork** 等无辜后台任务，`VADDR` 落在代码段或非法地址
-- **不连 WiFi 时完全不崩**；后续甚至**空转（不跑应用）也会崩**
-- 尝试过 6 种缓解方案（调大缓冲、降采样、分块发送、缓冲复用、socket 限流、串口直传）**均无法根治**
-- 关闭 SMP 会导致 **WiFi 驱动完全不可用**
-- 最终将缓冲配置**回退到默认值**后稳定性显著提升
-
-这是平台移植层的问题，超出应用层范围。我们选择**如实披露**并保留完整崩溃栈证据。
-
-### 两套配置并存
-
-| 配置 | 识别 | 说明 |
-|---|---|---|
-| `configs/hwtest`（**真实版**） | 真实调用模型 | 完整功能；需 WiFi + 服务器 + 本机模型服务就绪 |
-| `configs/hwtest-mock`（**演示版**） | 预设序列 | 自包含、无需联网；**其余环节全部真实** |
-
-**切换方式**：编译时换配置目录即可，**代码一行不改**：
-
-```bash
-./build.sh contest2026_087_gaiduimingyizhanyongdui/board/contest_board/configs/hwtest      -j2   # 真实
-./build.sh contest2026_087_gaiduimingyizhanyongdui/board/contest_board/configs/hwtest-mock -j2   # 演示
-```
-
-> ⚠️ 注意：这类只影响编译宏的配置变化，make **不一定会重编应用**。
-> 若切换后行为没变，请先删掉应用目标文件再编译：
-> `rm -f app/hello_app/*/*.o app/hello_app/*.o`
-
-### 视觉能力可独立验证
-
-视觉模型本身**完全可用**：现场可用 curl 调用本机模型服务验证真实检测结果：
-
-```bash
-curl --noproxy "*" -X POST http://<本机IP>:8000/detect -F "file=@photo.jpg"
-```
-
-### 备用链路：USB 串口直传
-
-针对 WiFi 通道的不稳定，我们还实现了**USB 串口直传**作为替代路径
-（`core/serial_link.c` + `tools/serial_bridge.py`）：设备经串口把图发给电脑，
-电脑推理后回写结果。含 Base64 编解码、分帧协议、**校验和重传**机制。
-打开 `CONFIG_CONTEST2026_087_PERCEPTION_SERIAL` 并在电脑上运行桥接脚本即可启用。
-
----
-
-## 十、已知限制
-
-- **大请求体下的 WiFi 稳定性**：向 WiFi 发送路径一次性灌入过大请求体
-  （>80KB base64）时，可能出现 `CPU1 IDLE` / `hpwork` 崩溃（ESP32-S3 SMP 与 WiFi
-  驱动的内核级问题，`VADDR` 落在代码段）。本作品已通过**上传图降采样至 160×120
-  （请求体约 25KB）+ 分块发送 + 调大 IOB/WiFi 缓冲**显著缓解，实测可连续多帧识图；
-  长时间运行若仍偶发，属该 openvela 移植的底层问题，非应用逻辑缺陷。
 - **AI 建议依赖 LLM Key**：未配置有效 `MIMO_API_KEY` 时，报告建议正文由规则模板生成，
   功能不受影响。
 - **视觉模型建议 GPU**：CPU 推理会明显变慢，建议用带 NVIDIA GPU 的机器。
-- **中继与前缀依赖**：演示时本机的视觉模型服务与 `frpc` 必须保持运行，否则识图失败。
+- **链路依赖**：运行时本机的视觉模型服务与 `frpc` 需保持运行，否则识图失败。
+- **传输量权衡**：设备上传降采样后的原始 RGB565（约 51KB base64）。若进一步增大
+  分辨率会导致传输量上升，在 `NET_SEND_BUFSIZE=16KB` 的默认配置下可能耗尽 TCP
+  连接资源（表现为 `connect` 失败）。如需更高分辨率，建议同时调大
+  `CONFIG_NET_SEND_BUFSIZE` 与 `CONFIG_IOB_NBUFFERS`。
 
-## 十一、许可
+## 十、许可
 
 - 本仓代码：参赛作品。
 - 手部模型 `NightingaleCen/YOLO26m-seg-hand`：AGPL-3.0。

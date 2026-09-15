@@ -118,21 +118,120 @@ PREVIEW_PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FOCUS AIoT 摄像头预览</title>
+<title>FOCUS AIoT · 实时预览</title>
 <style>
-  body{margin:0;background:#111;color:#eee;font-family:monospace;
-       display:flex;flex-direction:column;align-items:center}
-  h1{font-size:16px;margin:12px 0 4px}
-  img{max-width:100%;max-height:88vh;border:1px solid #333;
-      image-rendering:pixelated;background:#000}
+  :root{--bg:#0b1220;--card:#131e30;--line:#22304a;--fg:#eef4ff;
+        --muted:#91a0b5;--ok:#00c853;--warn:#ffb300;--err:#ff5252}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);min-height:100vh;
+       font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       display:flex;justify-content:center;align-items:flex-start;
+       padding:24px 16px}
+  .wrap{width:100%;max-width:720px}
+  .head{display:flex;align-items:center;justify-content:space-between;
+        margin-bottom:14px;flex-wrap:wrap;gap:8px}
+  .title{font-size:19px;font-weight:600;letter-spacing:.5px}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;
+       background:var(--muted);margin-right:7px;vertical-align:middle}
+  .dot.live{background:var(--ok);box-shadow:0 0 0 0 rgba(0,200,83,.7);
+            animation:pulse 1.8s infinite}
+  .dot.stale{background:var(--warn)}
+  .dot.wait{background:var(--muted)}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(0,200,83,.6)}
+    70%{box-shadow:0 0 0 9px rgba(0,200,83,0)}
+    100%{box-shadow:0 0 0 0 rgba(0,200,83,0)}}
+  .state{font-size:13px;color:var(--muted)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+        padding:12px}
+  .stage{position:relative;width:100%;aspect-ratio:4/3;background:#05080f;
+         border-radius:10px;overflow:hidden;display:flex;
+         align-items:center;justify-content:center}
+  .stage img{width:100%;height:100%;object-fit:contain;display:none;
+             image-rendering:pixelated}
+  .stage img.on{display:block}
+  .ph{color:var(--muted);font-size:14px;text-align:center;line-height:1.8}
+  .bar{display:flex;justify-content:space-between;align-items:center;
+       margin-top:12px;font-size:12px;color:var(--muted);flex-wrap:wrap;gap:6px}
+  .k{color:#5d6b80}
+  .foot{margin-top:14px;font-size:12px;color:#5d6b80;text-align:center}
+  a{color:var(--ok);text-decoration:none}
 </style>
 </head>
 <body>
-<h1>FOCUS AIoT 实时预览 (约每 5s 刷新一帧)</h1>
-<img id="pv" src="/preview.jpg" alt="等待设备上传画面...">
+<div class="wrap">
+  <div class="head">
+    <div class="title"><span class="dot wait" id="dot"></span>FOCUS AIoT · 实时预览</div>
+    <div class="state" id="state">连接中…</div>
+  </div>
+
+  <div class="card">
+    <div class="stage">
+      <img id="pv" alt="摄像头画面">
+      <div class="ph" id="ph">等待设备上传画面…<br><span style="font-size:12px">
+        设备进入「监测」状态后开始采集</span></div>
+    </div>
+    <div class="bar">
+      <span><span class="k">最后更新</span> <b id="ts">--:--:--</b></span>
+      <span><span class="k">画面大小</span> <b id="sz">--</b></span>
+      <span><span class="k">刷新</span> 每 2 秒自动</span>
+    </div>
+  </div>
+
+  <div class="foot">设备约每 5 秒采集一帧 ·
+    <a href="/report">查看学习报告</a></div>
+</div>
+
 <script>
-var img = document.getElementById('pv');
-setInterval(function(){ img.src = '/preview.jpg?t=' + Date.now(); }, 2000);
+var img   = document.getElementById('pv');
+var ph    = document.getElementById('ph');
+var dot   = document.getElementById('dot');
+var state = document.getElementById('state');
+var tsEl  = document.getElementById('ts');
+var szEl  = document.getElementById('sz');
+var url   = null;          // 当前 objectURL, 用于释放
+var lastOk = 0;            // 上次成功拿到画面的时间
+
+function pad(n){ return (n < 10 ? '0' : '') + n; }
+function clock(){ var d = new Date();
+  return pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds()); }
+
+// 用 fetch + no-store 强制拿最新帧: 避免浏览器缓存导致画面不更新
+function tick(){
+  fetch('/preview.jpg?t=' + Date.now(), {cache:'no-store'})
+    .then(function(r){
+      if (!r.ok) throw new Error('no frame');
+      return r.blob();
+    })
+    .then(function(b){
+      if (url) URL.revokeObjectURL(url);
+      url = URL.createObjectURL(b);
+      img.src = url;
+      img.classList.add('on');
+      ph.style.display = 'none';
+      lastOk = Date.now();
+      tsEl.textContent = clock();
+      szEl.textContent = (b.size/1024).toFixed(1) + ' KB';
+      dot.className = 'dot live';
+      state.textContent = '实时';
+    })
+    .catch(function(){
+      // 还没收到画面, 或设备未在采集
+      var age = Date.now() - lastOk;
+      if (!lastOk) {
+        dot.className = 'dot wait';
+        state.textContent = '等待画面';
+      } else if (age > 15000) {
+        dot.className = 'dot stale';
+        state.textContent = '画面已停止更新';
+      } else {
+        dot.className = 'dot stale';
+        state.textContent = '暂时无新帧';
+      }
+    });
+}
+tick();
+setInterval(tick, 2000);
 </script>
 </body>
 </html>
@@ -248,6 +347,42 @@ setInterval(load, 5000);
 """
 
 
+def rgb565_to_jpeg_bytes(data, width=320, height=240):
+    """RGB565 原始帧 → JPEG 字节流 (设备端不做编码时, 由本中继代做)。
+
+    设备打开 PERCEPTION_RAW_RGB 后直接上传 RGB565, 用于验证
+    "崩溃是否与设备端 JPEG 编码有关"。需要 PIL。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        print("[relay] 需要 PIL 处理 RGB565: pip install pillow")
+        return data
+
+    n = width * height
+    if len(data) < n * 2:
+        print("[relay] RGB565 数据不足: %d < %d" % (len(data), n * 2))
+        return data
+
+    rgb = bytearray(n * 3)
+    for i in range(n):
+        p = data[i * 2] | (data[i * 2 + 1] << 8)
+        r = (p >> 11) & 0x1F
+        g = (p >> 5) & 0x3F
+        b = p & 0x1F
+        rgb[i * 3]     = (r << 3) | (r >> 2)
+        rgb[i * 3 + 1] = (g << 2) | (g >> 4)
+        rgb[i * 3 + 2] = (b << 3) | (b >> 2)
+
+    import io
+    buf = io.BytesIO()
+    Image.frombytes("RGB", (width, height), bytes(rgb)).save(
+        buf, format="JPEG", quality=85)
+    out = buf.getvalue()
+    print("[relay] RGB565 %dKB -> JPEG %dKB" % (len(data) // 1024, len(out) // 1024))
+    return out
+
+
 def generate_advice(stats, mode="strict"):
     """调 MiMo (OpenAI 兼容) 生成中文建议; 失败则用本地模板兜底。"""
     d = stats.get("distractions") or [0, 0, 0, 0]
@@ -313,10 +448,12 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
 
             # 3. 识别: 优先本机检测服务 (DETECT_URL), 否则 MiMo 云端
             if DETECT_URL:
-                jpeg = self._extract_jpeg(body)
+                mime, rw, rh, jpeg = self._extract_image(body)
                 if jpeg is None:
                     self._reply(400, b'{"error":"no image in request body"}')
                     return
+                if mime == "x-rgb565":
+                    jpeg = rgb565_to_jpeg_bytes(base64.b64decode(jpeg), rw, rh)
                 result = self._detect_local(jpeg)
                 payload = self._to_openai_response(result)
                 self._reply(200, payload)
@@ -352,8 +489,8 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
                                .encode())
 
         # 两种模式各生成一份建议 (网页上并列展示, 便于对比)
-        advice         = self._generate_advice(stats, "strict")
-        advice_gentle  = self._generate_advice(stats, "gentle")
+        advice         = generate_advice(stats, "strict")
+        advice_gentle  = generate_advice(stats, "gentle")
         report = {
             "stats": {
                 # 网页统一用秒, 设备上报的是分钟
@@ -510,10 +647,12 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
 
     def _save_preview_frame(self, body):
         try:
-            b64 = self._extract_jpeg_b64(body)
+            mime, rw, rh, b64 = self._extract_image(body)
             if b64 is None:
                 return
             data = base64.b64decode(b64)
+            if mime == "x-rgb565":
+                data = rgb565_to_jpeg_bytes(data, rw, rh)
             if len(data) < 4:  # 空/损坏帧直接丢弃
                 return
             tmp = PREVIEW_JPEG_PATH + ".tmp"
@@ -523,6 +662,35 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
             print("[relay] preview saved %d bytes" % len(data))
         except Exception as e:  # noqa: BLE001
             print("[relay] preview save failed: %s" % e)
+
+    @staticmethod
+    def _extract_image(body):
+        """从请求体提取 (mime, b64)。支持 jpeg 与 x-rgb565 两种。
+
+        设备端打开 PERCEPTION_RAW_RGB 时会改用 data:image/x-rgb565;base64,
+        (不做 JPEG 编码, 由本中继转码) —— 用于验证崩溃是否与设备端编码有关。
+        """
+        # 依次尝试: jpeg / x-rgb565-<w>x<h> / x-rgb565 (缺省 320x240)
+        for mime in (b"data:image/jpeg;base64,",
+                     b"data:image/x-rgb565-160x120;base64,",
+                     b"data:image/x-rgb565;base64,"):
+            idx = body.find(mime)
+            if idx >= 0:
+                start = idx + len(mime)
+                end = body.find(b'"', start)
+                if end < 0:
+                    end = len(body)
+                tag = mime.decode().split(":")[1].split(";")[0].split("/")[-1]
+                w, h = 320, 240
+                if tag.startswith("x-rgb565-"):
+                    try:
+                        dim = tag[len("x-rgb565-"):].split("x")
+                        w, h = int(dim[0]), int(dim[1])
+                    except Exception:  # noqa: BLE001
+                        pass
+                    tag = "x-rgb565"
+                return tag, w, h, body[start:end]
+        return None, 0, 0, None
 
     @staticmethod
     def _extract_jpeg_b64(body):

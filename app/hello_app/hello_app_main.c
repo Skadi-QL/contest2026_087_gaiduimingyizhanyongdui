@@ -327,8 +327,18 @@ int main(int argc, char *argv[])
                     {
                         printf("[cam] #%u 采集OK %uB -> 转JPEG...\n",
                                cap_seq, (unsigned)fsize);
+#ifdef PERCEPTION_RAW_RGB
+                        /* 设备端不做 JPEG 编码, 直接把 RGB565 交给服务器转码
+                         * (TinyJPEG 的 8KB 栈帧 + 230KB 缓冲 + 密集浮点会触发
+                         * 平台级崩溃)。此处先 2x 降采样: 全尺寸 205KB(base64)
+                         * 会压垮 TCP 发送资源, 降到 160x120 仅约 51KB。 */
+                        jpeg_size = rgb565_downsample_2x(frame, 320, 240,
+                                                         jpeg_buf);
+                        if (1)
+#else
                         if (rgb565_to_jpeg(frame, 320, 240,
                                            jpeg_buf, &jpeg_size) == 0)
+#endif
                         {
                             printf("[cam] #%u JPEG %uB -> 识图...\n",
                                    cap_seq, (unsigned)jpeg_size);
