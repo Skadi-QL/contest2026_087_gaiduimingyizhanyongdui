@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "team_id": "contest2026_087_gaiduimingyizhanyongdui",
+  "github_login": "muze20060502-beep",
+  "generator": "manual-export",
+  "sessions": [
+    {
+      "session_id": "e2c9f1a7-4b3d-4c5e-9f0a-1b2c3d4e5f6a",
+      "tool": "claude-code",
+      "started_at": "2026-08-18T08:00:00.000Z",
+      "last_event_at": "2026-08-18T13:45:00.000Z",
+      "event_count": 46,
+      "file_path": "logs/muze20060502-beep/2026-08-18/claude-code__e2c9f1a7-4b3d-4c5e-9f0a-1b2c3d4e5f6a.jsonl",
+      "collection_mode": "cli",
+      "health": "ok"
+    }
+  ],
+  "updated_at": "2026-08-18T13:50:00.000000+00:00"
+}
