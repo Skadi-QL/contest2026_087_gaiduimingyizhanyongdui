@@ -201,5 +201,19 @@ CONFIG_WIRELESS_WAPI_INITCONF=y
 CONFIG_WIRELESS_WAPI_STACKSIZE=8192
 CONFIG_ESP32S3_WIFI_DYNAMIC_TXBUF_NUM=32
 CONFIG_ESP32S3_WIFI_DYNAMIC_RXBUF_NUM=32
+#
+# 后端选择 (真机 = 全部关掉桩)。
+#
+# 必须显式关闭: LCD 之外的 4 个 *_STUB 在 app/hello_app/Kconfig 里 default y。
+# 本文件若不写这几行, configure.sh 生成的 .config 就会缺少这些符号, 紧接着
+# make 跑 olddefconfig 时会按 Kconfig 默认值补齐 → 编成桩固件, 链接期报
+# `undefined reference to wifi_set_http_auth` (该符号只在 hardware/wifi_esp32.c)。
+# LCD_STUB / PERCEPTION_SERIAL 默认为 n, 列出仅为表意清楚。
+# CONFIG_CONTEST2026_087_LCD_STUB is not set
+# CONFIG_CONTEST2026_087_WIFI_STUB is not set
+# CONFIG_CONTEST2026_087_BUTTON_STUB is not set
+# CONFIG_CONTEST2026_087_CAMERA_STUB is not set
+# CONFIG_CONTEST2026_087_AUDIO_STUB is not set
 # CONFIG_CONTEST2026_087_PERCEPTION_MOCK is not set
+# CONFIG_CONTEST2026_087_PERCEPTION_SERIAL is not set
 CONFIG_CONTEST2026_087_PERCEPTION_RAW_RGB=y

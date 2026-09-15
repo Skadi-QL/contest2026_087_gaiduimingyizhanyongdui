@@ -325,7 +325,7 @@ int main(int argc, char *argv[])
                     cret = camera_capture_frame(frame, &fsize);
                     if (cret == FOCUS_OK && fsize > 0)
                     {
-                        printf("[cam] #%u 采集OK %uB -> 转JPEG...\n",
+                        printf("[cam] #%u 采集OK %uB -> 预处理...\n",
                                cap_seq, (unsigned)fsize);
 #ifdef PERCEPTION_RAW_RGB
                         /* 设备端不做 JPEG 编码, 直接把 RGB565 交给服务器转码
@@ -340,8 +340,17 @@ int main(int argc, char *argv[])
                                            jpeg_buf, &jpeg_size) == 0)
 #endif
                         {
+                            /* 打点文案随编码位置变化: RAW_RGB 模式下设备端
+                             * 不产 JPEG, jpeg_size 里装的是降采样后的原始
+                             * RGB565 字节数, 别让串口日志谎称"JPEG"。 */
+#ifdef PERCEPTION_RAW_RGB
+                            printf("[cam] #%u 降采样 RAW RGB565 %uB -> "
+                                   "识图...\n",
+                                   cap_seq, (unsigned)jpeg_size);
+#else
                             printf("[cam] #%u JPEG %uB -> 识图...\n",
                                    cap_seq, (unsigned)jpeg_size);
+#endif
                             pret = perception_process(jpeg_buf, jpeg_size, &obs);
                             printf("[cam] #%u 识图返回=%d person=%d phone=%d "
                                    "pitch=%.1f motion=%.2f conf=%.2f\n",
