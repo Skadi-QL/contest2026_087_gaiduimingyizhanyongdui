@@ -56,8 +56,9 @@ int mimo_get_advice(session_stats_t *stats,
       return 0;
     }
 
-  if (wifi_is_connected())
-    {
+  printf("[report] 上报学习统计 (wifi_connected=%d)...\n",
+         (int)wifi_is_connected());
+  {
       snprintf(request, sizeof(request),
                "{\"total_min\":%lu,\"effective_min\":%lu,"
                "\"distractions\":[%u,%u,%u,%u],\"focus_score\":%u,"
@@ -75,9 +76,13 @@ int mimo_get_advice(session_stats_t *stats,
       (void)response;
       (void)serial_send_report(request);
 #else
-      /* 响应仅供中继记账, 设备不解析 (建议正文在网页上) */
-      (void)wifi_http_post(REPORT_API_URL, request,
-                           response, sizeof(response));
+      /* 响应仅供中继记账, 设备不解析 (建议正文在网页上)。
+       * 不做 wifi_is_connected() 门控 —— 该判断曾导致上报被静默跳过,
+       * 而未连接时 http 会自行快速失败。 */
+      int rret = wifi_http_post(REPORT_API_URL, request,
+                                response, sizeof(response));
+      printf("[report] 上报返回 %d%s\n", rret,
+             rret < 0 ? " (失败: 检查 WiFi/服务器)" : "");
 #endif
     }
 

@@ -137,3 +137,42 @@ int rgb565_to_jpeg(const uint8_t *rgb565, int width, int height,
   *jpeg_size = sink.used;
   return 0;
 }
+
+/****************************************************************************
+ * Name: rgb565_downsample_2x
+ *
+ * 2x2 抽样降采样 RGB565 (如 320x240 -> 160x120)。取每 2x2 块的左上角像素,
+ * 够用且快。用于「设备端不编码、直接把原始帧交给服务器」的方案:
+ * 全尺寸 320x240 RGB565 base64 后约 205KB, 会压垮 TCP 发送资源
+ * (send 缓冲仅 16KB, 连接 TIME_WAIT 堆积导致 connect 失败);
+ * 降到 160x120 后仅约 51KB。
+ *
+ * src: 源 RGB565; sw/sh: 源宽高; dst: 目标缓冲 (需 sw/2 * sh/2 * 2 字节)
+ * 返回: 写入的字节数 (即目标帧大小)
+ ****************************************************************************/
+size_t rgb565_downsample_2x(const uint8_t *src, int sw, int sh, uint8_t *dst)
+{
+  int dw = sw / 2;
+  int dh = sh / 2;
+  int x;
+  int y;
+
+  if (src == NULL || dst == NULL || dw <= 0 || dh <= 0)
+    {
+      return 0;
+    }
+
+  for (y = 0; y < dh; y++)
+    {
+      for (x = 0; x < dw; x++)
+        {
+          size_t si = (((size_t)(y * 2) * sw) + (size_t)(x * 2)) * 2;
+          size_t di = (((size_t)y * dw) + (size_t)x) * 2;
+
+          dst[di]     = src[si];
+          dst[di + 1] = src[si + 1];
+        }
+    }
+
+  return (size_t)dw * (size_t)dh * 2;
+}

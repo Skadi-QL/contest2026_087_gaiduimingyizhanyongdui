@@ -37,6 +37,16 @@
 #include "perception_internal.h"
 #include "../core/serial_link.h"
 
+/* 上传图像的 MIME: 默认 JPEG; 打开 PERCEPTION_RAW_RGB 则直接上传 RGB565
+ * 原始帧 (设备端不做 JPEG 编码, 由中继转换) —— 用于验证"崩溃是否与
+ * 设备端编码有关"。注意: 320x240 RGB565 原始帧 base64 后约 205KB,
+ * 是 JPEG 的 7.7 倍, 传输压力显著增大。 */
+#ifdef PERCEPTION_RAW_RGB
+#  define IMG_DATA_URL   "data:image/x-rgb565-160x120;base64,"
+#else
+#  define IMG_DATA_URL   "data:image/jpeg;base64,"
+#endif
+
 /* ======================================================================
  * 错误码统一使用 api/error.h (FOCUS_ERR_PERCEP_* = -30/-31/-32)
  * ====================================================================== */
@@ -316,7 +326,7 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
 
     /* 2. 构造 OpenAI chat/completions 请求体:
      *    model + messages(system + user[image_url base64, text prompt]) */
-    size_t img_len = strlen("data:image/jpeg;base64,") + b64_len;
+    size_t img_len = strlen(IMG_DATA_URL) + b64_len;
     size_t req_cap = img_len + sizeof(MIMO_PROMPT) + 256;
     char *req = scratch_get(&g_req_buf, &g_req_cap, req_cap);
     if (req == NULL) {
@@ -328,7 +338,7 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
              "{\"role\":\"system\",\"content\":\"You are MiMo, an AI assistant "
              "developed by Xiaomi.\"},"
              "{\"role\":\"user\",\"content\":["
-             "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,%s\"}},"
+             "{\"type\":\"image_url\",\"image_url\":{\"url\":\"" IMG_DATA_URL "%s\"}},"
              "{\"type\":\"text\",\"text\":\"%s\"}]}]}",
              MIMO_MODEL, b64, MIMO_PROMPT);
 

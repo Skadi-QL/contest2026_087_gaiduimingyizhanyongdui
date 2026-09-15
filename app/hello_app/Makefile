@@ -62,4 +62,9 @@ ifeq ($(CONFIG_CONTEST2026_087_PERCEPTION_SERIAL),y)
 CFLAGS += -DPERCEPTION_SERIAL
 endif
 
+# 实验: 设备端不编码, 直接上传 RGB565 原始帧 (由中继转 JPEG)
+ifeq ($(CONFIG_CONTEST2026_087_PERCEPTION_RAW_RGB),y)
+CFLAGS += -DPERCEPTION_RAW_RGB
+endif
+
 include $(APPDIR)/Application.mk

@@ -65,3 +65,14 @@ config CONTEST2026_087_PERCEPTION_SERIAL
         vision inference and writes the result back on the same serial line.
         This avoids the openvela ESP32-S3 SMP WiFi-TX crash triggered by large
         HTTP bodies.  Requires PERCEPTION_MOCK to be off.
+
+config CONTEST2026_087_PERCEPTION_RAW_RGB
+    bool "Experimental: upload raw RGB565 (encoding on relay)"
+    default n
+    depends on LVX_USE_DEMO_CONTEST2026_087_HELLO_APP
+    help
+        Skip the on-device JPEG encoder and upload the raw RGB565 frame
+        instead; the relay converts it to JPEG.  Experiment to check whether
+        the platform instability is related to on-device encoding.
+        NOTE: 320x240 RGB565 is ~205KB after base64 (7.7x the JPEG), which
+        greatly increases transfer pressure.
