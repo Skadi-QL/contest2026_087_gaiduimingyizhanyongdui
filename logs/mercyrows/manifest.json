@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "team_id": "contest2026_087_gaiduimingyizhanyongdui",
+  "github_login": "mercyrows",
+  "generator": "codex-app-manual-export",
+  "sessions": [
+    {
+      "session_id": "01a00fbc-1a80-7473-9720-de1eec82a505",
+      "tool": "codex",
+      "started_at": "2026-08-17T12:39:40.000Z",
+      "last_event_at": "2026-08-17T13:04:27.000Z",
+      "event_count": 23,
+      "file_path": "logs/mercyrows/2026-08-17/codex__01a00fbc-1a80-7473-9720-de1eec82a505.jsonl",
+      "collection_mode": "manual-selected",
+      "health": "ok"
+    },
+    {
+      "session_id": "01a010f9-4efd-7ad2-babd-529cb50b7303",
+      "tool": "codex",
+      "started_at": "2026-08-17T18:26:09.000Z",
+      "last_event_at": "2026-08-17T18:29:11.000Z",
+      "event_count": 3,
+      "file_path": "logs/mercyrows/2026-08-18/codex__01a010f9-4efd-7ad2-babd-529cb50b7303.jsonl",
+      "collection_mode": "manual-selected",
+      "health": "ok"
+    }
+  ],
+  "updated_at": "2026-09-14T15:52:09.072Z"
+}
