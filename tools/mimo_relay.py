@@ -425,18 +425,27 @@ def generate_advice(stats, mode="strict"):
 
 
 class RelayHandler(http.server.BaseHTTPRequestHandler):
+    # HTTP/1.1 —— 设备端复用同一条 TCP 连接上传每一帧 (约 5s 一帧)。
+    # HTTP/1.0 会在每个响应后强制关闭连接, 设备就得每帧重新 connect/close,
+    # 正是这个churn把 nuttx 的 TCP/IOB 池耗尽, connect 失败返回 -20
+    # (FOCUS_ERR_NET_DISCONN)。
+    protocol_version = "HTTP/1.1"
+    # 空闲连接回收: 设备退回 IDLE 后连接会闲置, 别让服务端线程永久阻塞
+    timeout = 120
+
     def do_POST(self):
         try:
-            # 1. 校验中继令牌 (设备侧 wifi_set_http_auth 设置)
+            # 1. 先把请求体读干净。必须在任何提前 return 之前读完 ——
+            #    keep-alive 连接上残留的 body 会被当成下一个请求的起始行。
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+
+            # 2. 校验中继令牌 (设备侧 wifi_set_http_auth 设置)
             if RELAY_TOKEN:
                 auth = self.headers.get("Authorization", "")
                 if auth != "Bearer " + RELAY_TOKEN:
                     self._reply(403, b'{"error":"forbidden: bad relay token"}')
                     return
-
-            # 2. 读设备发来的请求体 (OpenAI 兼容, 含 base64 图, 可能上百 KB)
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
 
             # 2.1 学习报告: 设备一局结束上传统计 → MiMo 生成建议 → 存网页
             #     (路径用 /report; 其余路径一律按识图处理)
@@ -454,6 +463,8 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
                     return
                 if mime == "x-rgb565":
                     jpeg = rgb565_to_jpeg_bytes(base64.b64decode(jpeg), rw, rh)
+                else:
+                    jpeg = base64.b64decode(jpeg)   # 设备直传 JPEG 时也解码
                 result = self._detect_local(jpeg)
                 payload = self._to_openai_response(result)
                 self._reply(200, payload)
@@ -665,32 +676,45 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
 
     @staticmethod
     def _extract_image(body):
-        """从请求体提取 (mime, b64)。支持 jpeg 与 x-rgb565 两种。
+        """从请求体提取 (mime, w, h, b64)。支持 jpeg 与 x-rgb565 两种。
 
-        设备端打开 PERCEPTION_RAW_RGB 时会改用 data:image/x-rgb565;base64,
-        (不做 JPEG 编码, 由本中继转码) —— 用于验证崩溃是否与设备端编码有关。
+        设备端打开 PERCEPTION_RAW_RGB 时发
+        data:image/x-rgb565[-<w>x<h>];base64,<b64> —— 设备不做 JPEG 编码,
+        由本中继转码。
+
+        按 "data:image/" 前缀通配解析, 分辨率从 mime 里读、不写死: 设备
+        改分辨率时中继无需跟着改 (例如从 160x120 回到 320x240)。
         """
-        # 依次尝试: jpeg / x-rgb565-<w>x<h> / x-rgb565 (缺省 320x240)
-        for mime in (b"data:image/jpeg;base64,",
-                     b"data:image/x-rgb565-160x120;base64,",
-                     b"data:image/x-rgb565;base64,"):
-            idx = body.find(mime)
-            if idx >= 0:
-                start = idx + len(mime)
-                end = body.find(b'"', start)
-                if end < 0:
-                    end = len(body)
-                tag = mime.decode().split(":")[1].split(";")[0].split("/")[-1]
-                w, h = 320, 240
-                if tag.startswith("x-rgb565-"):
-                    try:
-                        dim = tag[len("x-rgb565-"):].split("x")
-                        w, h = int(dim[0]), int(dim[1])
-                    except Exception:  # noqa: BLE001
-                        pass
-                    tag = "x-rgb565"
-                return tag, w, h, body[start:end]
-        return None, 0, 0, None
+        idx = body.find(b"data:image/")
+        if idx < 0:
+            return None, 0, 0, None
+        start = idx + len(b"data:image/")
+        end = body.find(b'"', start)
+        if end < 0:
+            end = len(body)
+        header = body[start:end].decode("ascii", "replace")
+
+        # header 形如 "x-rgb565-320x240;base64,<b64>" 或 "jpeg;base64,<b64>"
+        parts = header.split(";", 1)
+        if len(parts) != 2:
+            return None, 0, 0, None
+        tag, rest = parts[0], parts[1]
+        if not rest.startswith("base64,"):
+            return None, 0, 0, None
+
+        w, h = 320, 240
+        if tag.startswith("x-rgb565"):
+            suffix = tag[len("x-rgb565"):]           # "" 或 "-320x240"
+            if suffix.startswith("-"):
+                try:
+                    dim = suffix[1:].split("x")
+                    w, h = int(dim[0]), int(dim[1])
+                except Exception:  # noqa: BLE001
+                    pass
+            tag = "x-rgb565"                          # 归一化, 调用方按此分支
+        else:
+            tag = "jpeg"
+        return tag, w, h, rest[len("base64,"):]
 
     @staticmethod
     def _extract_jpeg_b64(body):

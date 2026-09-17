@@ -316,7 +316,9 @@ int main(int argc, char *argv[])
                 {
                     static unsigned cap_seq = 0;
                     size_t fsize = 0;
-                    size_t jpeg_size = 320 * 240 * 3;
+                    size_t img_len = 0;
+                    const uint8_t *img = NULL;
+                    int ok;
                     int cret;
                     int pret;
 
@@ -327,31 +329,34 @@ int main(int argc, char *argv[])
                     {
                         printf("[cam] #%u 采集OK %uB -> 预处理...\n",
                                cap_seq, (unsigned)fsize);
+
+                        /* 待上传图像。RAW_RGB 模式下就是采集到的原始帧**本身**:
+                         * 不做 JPEG 编码, 也不做降采样 —— 降采样会丢掉手机这类
+                         * 小目标的细节, 实测明显拉低识别率。全尺寸 320x240
+                         * base64 后约 205KB, 传输压力靠复用长连接 + 加大
+                         * TCP/IOB 缓冲解决 (hardware/wifi_esp32.c、
+                         * hwtest/defconfig), 不靠减数据。直接指向 frame,
+                         * 顺带省掉一次 150KB 的拷贝。
+                         * 未开 RAW_RGB 时才走设备端 TinyJPEG 编码。 */
 #ifdef PERCEPTION_RAW_RGB
-                        /* 设备端不做 JPEG 编码, 直接把 RGB565 交给服务器转码
-                         * (TinyJPEG 的 8KB 栈帧 + 230KB 缓冲 + 密集浮点会触发
-                         * 平台级崩溃)。此处先 2x 降采样: 全尺寸 205KB(base64)
-                         * 会压垮 TCP 发送资源, 降到 160x120 仅约 51KB。 */
-                        jpeg_size = rgb565_downsample_2x(frame, 320, 240,
-                                                         jpeg_buf);
-                        if (1)
+                        img = frame;
+                        img_len = fsize;
+                        ok = 1;
 #else
-                        if (rgb565_to_jpeg(frame, 320, 240,
-                                           jpeg_buf, &jpeg_size) == 0)
+                        img = jpeg_buf;
+                        ok = (rgb565_to_jpeg(frame, 320, 240, jpeg_buf,
+                                             &img_len) == 0);
 #endif
+                        if (ok)
                         {
-                            /* 打点文案随编码位置变化: RAW_RGB 模式下设备端
-                             * 不产 JPEG, jpeg_size 里装的是降采样后的原始
-                             * RGB565 字节数, 别让串口日志谎称"JPEG"。 */
+                            printf("[cam] #%u %s %uB -> 识图...\n", cap_seq,
 #ifdef PERCEPTION_RAW_RGB
-                            printf("[cam] #%u 降采样 RAW RGB565 %uB -> "
-                                   "识图...\n",
-                                   cap_seq, (unsigned)jpeg_size);
+                                   "RAW RGB565 全尺寸",
 #else
-                            printf("[cam] #%u JPEG %uB -> 识图...\n",
-                                   cap_seq, (unsigned)jpeg_size);
+                                   "JPEG",
 #endif
-                            pret = perception_process(jpeg_buf, jpeg_size, &obs);
+                                   (unsigned)img_len);
+                            pret = perception_process(img, img_len, &obs);
                             printf("[cam] #%u 识图返回=%d person=%d phone=%d "
                                    "pitch=%.1f motion=%.2f conf=%.2f\n",
                                    cap_seq, pret,
