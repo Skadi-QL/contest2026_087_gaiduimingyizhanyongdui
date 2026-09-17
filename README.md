@@ -97,6 +97,11 @@ contest2026_087_gaiduimingyizhanyongdui/
 ├─ patches/
 │  └─ 0001-nuttx-esp32s3-cam-realign-dma-on-first-vsync.patch
 │                            # ← 必需的内核补丁：相机 DMA 帧对齐（见排障第 5 条）
+├─ skills/                   # 本项目踩过的坑沉淀成的可复用 skill（详见第八节）
+│  ├─ openvela-build-recovery/SKILL.md      # 构建自毁/恢复、Kconfig 默认值、.built 归档
+│  ├─ nuttx-camera-frame-debug/SKILL.md     # 画面卷动/颜色错乱的 DMA 相位根因
+│  ├─ nuttx-http-client-stability/SKILL.md  # 大 body 上传的连接耗尽与 keep-alive
+│  └─ dist/*.skill                          # 打包件，可直接安装使用
 ├─ tools/
 │  ├─ mimo_relay.py          # 中转服务器：识图转发 + 学习报告 + 网页
 │  ├─ serial_bridge.py       # 电脑端串口桥接（备用链路，替代 WiFi）
@@ -518,6 +523,21 @@ gcc -o /tmp/t_ui tests/test_ui.c ui/lcd.c ui/lcd_icons.c ui/mimo.c \
     字节完整自洽，`bytesused` 与 `V4L2_BUF_FLAG_ERROR` 都检测不出来，只能从画面
     看出来。修复方式是在第一个 VSYNC 中断里重启 DMA 通道完成重对齐（见排障第 5 条）。
 - **文档**：本 README 的搭建步骤与排障说明由 AI 整理。
+
+### 把踩过的坑沉淀成 skill
+
+上面的调试经验如果不固化，下次遇到同类问题仍要重新摸索。因此本项目把三条最贵的
+经验抽取成了可复用的 skill，随仓放在 `skills/`：
+
+| skill | 解决的问题 |
+|---|---|
+| `openvela-build-recovery` | 构建产物凭空消失、ESP HAL 丢失、Kconfig 默认值悄悄改掉配置、链接期一串 `undefined reference`、改了 STACKSIZE 不重编 |
+| `nuttx-camera-frame-debug` | 画面卷动 / 颜色错乱（DMA 起始相位）、噪点性质判定、跨端取色比对 |
+| `nuttx-http-client-stability` | 大 body 上传若干帧后连接耗尽、keep-alive 的定界陷阱、TCP/IOB 缓冲调参 |
+
+用法：把 `skills/<name>/` 拷到 `~/.claude/skills/` 或工作区的 `.claude/skills/` 即可
+被 Claude Code 自动发现；`skills/dist/*.skill` 是打包件，可直接安装。三个 skill 均
+通过组委会同款 skill 校验器（`skill-creator/scripts/quick_validate.py`）。
 
 完整对话日志见 `logs/` 目录。
 
