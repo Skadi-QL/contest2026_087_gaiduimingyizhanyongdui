@@ -92,6 +92,11 @@ contest2026_087_gaiduimingyizhanyongdui/
 │  └─ tests/                 # 主机单元测试（UI/行为/感知）
 ├─ board/contest_board/      # 板级配置
 │  └─ configs/hwtest/defconfig   # ← 本作品使用的 openvela 配置
+├─ scripts/
+│  └─ build_hwtest.sh        # 一键构建（工具链/HAL/兼容补丁/相机补丁全自动）
+├─ patches/
+│  └─ 0001-nuttx-esp32s3-cam-realign-dma-on-first-vsync.patch
+│                            # ← 必需的内核补丁：相机 DMA 帧对齐（见排障第 5 条）
 ├─ tools/
 │  ├─ mimo_relay.py          # 中转服务器：识图转发 + 学习报告 + 网页
 │  ├─ serial_bridge.py       # 电脑端串口桥接（备用链路，替代 WiFi）
@@ -139,21 +144,25 @@ xtensa-esp32s3-elf-gcc --version     # 应输出 12.2.0
 
 ### 步骤 2：编译并烧录设备固件
 
-**环境**：Linux（推荐 Ubuntu 22.04）。**首次构建需要能访问 github.com** —— 会拉
-ESP HAL 及其子模块，约 444 MB，网络通畅程度直接决定耗时（实测代理约 220–500 KB/s，
-光拉 HAL 就要 20–30 分钟）。
+**环境**：Linux（推荐 Ubuntu 22.04）。**首次构建需要能访问 github.com**（拉 ESP HAL
+及其子模块）。
+
+**一条命令**（在 openvela 工作区根目录，即本仓的上一级执行）：
 
 ```bash
-# 进入 openvela 工作区根目录（本仓的上一级）
-cd ..
-
-# ⚠️ 官方修复脚本必须在首次构建期间后台运行（它不是可选项，理由见下方排障第 2 条）。
-#    它等 ESP HAL 落地后打 4 个补丁，其中 Fix3 是 clk_ctrl_os.c 的 spinlock 初始化，
-#    不打会直接编译失败: clk_ctrl_os.c:27:41: error: invalid initializer
-bash packages/ai_agent/fix_esp32s3.sh &
-
-./build.sh contest2026_087_gaiduimingyizhanyongdui/board/contest_board/configs/hwtest -j2
+bash contest2026_087_gaiduimingyizhanyongdui/scripts/build_hwtest.sh
 ```
+
+脚本会把评委手动复现时最容易踩的四个坑一并处理掉，每步都在输出里注明了原因：
+
+| # | 坑 | 脚本的处理 |
+|---|---|---|
+| 1 | 交叉工具链不在 PATH | 它在 manifest 里是 `notdefault` 组，`repo sync -c -j8` **不会拉**；脚本检查，缺失时直接给出 clone 命令 |
+| 2 | ESP HAL 编译不过 | 自动打两项兼容补丁（见下方排障第 2 条） |
+| 3 | **画面卷动 / 颜色错乱** | 自动应用本仓 `patches/` 下的**相机 DMA 对齐补丁**（见排障第 5 条） |
+| 4 | 仓库 defconfig 被改 | `build.sh` 结尾会 `savedefconfig` 覆盖回仓库，脚本构建后还原 |
+
+首次约 15–40 分钟（取决于网络）。**之后重跑同一条命令即走增量编译**，不会再重新配置。
 
 **关键配置**（已在 `hwtest/defconfig` 中设置，无需手动改）：
 
@@ -167,54 +176,15 @@ bash packages/ai_agent/fix_esp32s3.sh &
 
 产物：`nuttx/nuttx.bin`
 
-**增量编译**（改代码后用这个，**首次之后不要再跑 `build.sh`**，原因见排障第 1 条）：
+**增量编译**：重跑上面的脚本即可（它检测到 `nuttx/.config` 已存在就只跑 `make`）。
+若想手动跑：
 
 ```bash
 export PATH=$PWD/prebuilts/gcc/linux-x86_64/xtensa-esp32s3-elf/bin:$PATH
 make -C nuttx -j2
 ```
 
-#### 构建排障（复现必读）
-
-以下四条是本作品开发中真实踩到并定位过的，评委复现时大概率会遇到：
-
-**1. `build.sh` 只能用于首次构建，之后一律用 `make -C nuttx -j2`。**
-`build.sh` 内部调 `configure.sh -e`，配置一旦变化就执行 `make distclean`；而
-`nuttx/arch/xtensa/src/esp32s3/Make.defs` 末尾有
-`distclean:: $(call DELDIR,chip/esp-hal-3rdparty)` —— 会把已拉好的 ESP HAL
-**连同全部目标文件一起删掉**，下次构建又要重下 444 MB。此外 `build.sh` 结尾会
-`make savedefconfig` 并把结果**覆盖回仓库里的 defconfig**。
-
-**2. `packages/ai_agent/fix_esp32s3.sh` 是必跑项。** 它修 4 处：mbedtls 头文件优先级
-改 `-isystem`、ESP-IDF mbedtls 禁用 `MBEDTLS_CCM_C`、`clk_ctrl_os.c` 的 spinlock
-初始化、`esp32s3_bringup.c` 挂 `/data` tmpfs。其中第 3 项不打就是硬编译失败 ——
-nuttx 自 `508ece9fb2d` 起把 `spinlock_t` 改成了结构体，而 ESP HAL 钉住的版本
-（`9fc713a`，早 3 个月）仍按标量写 `= 0`。
-
-**3. 清理 `libapps.a` 时必须连 `.built` 标记一起删。** `apps/Application.mk` 里
-「把目标文件塞进归档」这个动作挂在 `.built` 的规则上；`.built` 比 `.o` 新就会跳过归档，
-链接期报一串 `undefined reference`（本项目见过 `cJSON_*`、`hello_app_main`、
-`iperf2_main`）。注意 `find` 默认**不跟随符号链接**，而 `apps/packages`、`apps/external`
-都是软链，必须显式扩到真实目录：
-
-```bash
-find -L apps packages external frameworks tests vendor \
-     contest2026_087_gaiduimingyizhanyongdui \
-     -name ".built" -not -path "*/.git/*" -delete
-rm -f apps/libapps.a nuttx/staging/libapps.a
-```
-
-**4. ESP HAL 丢失后的快速恢复**（不必全量 clone，约 20 秒）：
-
-```bash
-cd nuttx/arch/xtensa/src/esp32s3 && rm -rf esp-hal-3rdparty \
-  && mkdir esp-hal-3rdparty && cd $_
-git init -q && git remote add origin https://github.com/espressif/esp-hal-3rdparty.git
-git fetch -q --depth=1 origin 9fc713a95b1ff150dd0b0647e465d3c624056bb1
-git checkout -q FETCH_HEAD
-```
-
-之后 `make -C nuttx -j2` 会自动补子模块并应用 mbedtls 补丁。
+> ⚠️ **首次之后不要再直接跑 `./build.sh`** —— 见排障第 1 条。
 
 **烧录**（需 esptool）：
 
@@ -245,6 +215,84 @@ nsh> hello_app                                # 启动主程序
 | 报告页短按 | 返回待机 |
 
 > 只有**进入监测状态后**才采集与识图（IDLE/模式选择/报告页不采集）。
+
+#### 构建排障（复现必读）
+
+以下五条是本作品开发中真实踩到并定位过的，评委复现时大概率会遇到。
+`scripts/build_hwtest.sh` 已把第 1、2、5 条自动处理，这里记录成因供排查。
+
+**1. `build.sh` 只能用于首次构建，之后一律用 `make -C nuttx -j2`。**
+`build.sh` 内部调 `configure.sh -e`，配置一旦变化就执行 `make distclean`；而
+`nuttx/arch/xtensa/src/esp32s3/Make.defs` 末尾有
+`distclean:: $(call DELDIR,chip/esp-hal-3rdparty)` —— 会把已拉好的 ESP HAL
+**连同全部目标文件一起删掉**，下次构建又要重下 444 MB。此外 `build.sh` 结尾会
+`make savedefconfig` 并把结果**覆盖回仓库里的 defconfig**。
+
+**2. ESP HAL / mbedtls 兼容补丁是必打项（脚本自动打）。** 本作品需要其中两项：
+
+- **(a) `clk_ctrl_os.c` 的 spinlock 初始化** —— 不打就是硬编译失败。nuttx 自
+  `508ece9fb2d` "define spinlock with atomic type" 起把 `spinlock_t` 变成了结构体，
+  而 ESP HAL 钉住的 `9fc713a` 比它早 3 个月，仍按标量写 `= 0`：
+  `clk_ctrl_os.c:27:41: error: invalid initializer`。改为 nuttx 的 `SP_UNLOCKED`。
+- **(b) `apps/crypto/mbedtls/Make.defs` 的 `-I` → `-isystem`** —— ESP-IDF 与 nuttx
+  的 `cipher_info_t` 布局不同，改用 `-isystem` 让 ESP-IDF 头文件在编译 esp-hal 源
+  文件时优先，避免结构体冲突。
+
+  官方 `packages/ai_agent/fix_esp32s3.sh` 还包含另外两项（禁用 HAL mbedtls 的
+  `MBEDTLS_CCM_C`、给 `esp32s3_bringup.c` 挂 `/data` tmpfs），那是给 ai_agent 用的，
+  本作品不需要 —— 因此**本仓脚本刻意不引入**，以保证评委编出的固件与本队真机验证
+  的完全一致。
+
+**3. 清理 `libapps.a` 时必须连 `.built` 标记一起删。** `apps/Application.mk` 里
+「把目标文件塞进归档」这个动作挂在 `.built` 的规则上；`.built` 比 `.o` 新就会跳过归档，
+链接期报一串 `undefined reference`（本项目见过 `cJSON_*`、`hello_app_main`、
+`iperf2_main`）。注意 `find` 默认**不跟随符号链接**，而 `apps/packages`、`apps/external`
+都是软链，必须显式扩到真实目录：
+
+```bash
+find -L apps packages external frameworks tests vendor \
+     contest2026_087_gaiduimingyizhanyongdui \
+     -name ".built" -not -path "*/.git/*" -delete
+rm -f apps/libapps.a nuttx/staging/libapps.a
+```
+
+**4. ESP HAL 丢失后的快速恢复**（不必全量 clone，约 20 秒）：
+
+```bash
+cd nuttx/arch/xtensa/src/esp32s3 && rm -rf esp-hal-3rdparty \
+  && mkdir esp-hal-3rdparty && cd $_
+git init -q && git remote add origin https://github.com/espressif/esp-hal-3rdparty.git
+git fetch -q --depth=1 origin 9fc713a95b1ff150dd0b0647e465d3c624056bb1
+git checkout -q FETCH_HEAD
+```
+
+之后 `make -C nuttx -j2` 会自动补子模块并应用 mbedtls 补丁。
+
+**5. 相机 DMA 帧对齐补丁是本作品必需的 —— 缺了画面会卷动 / 颜色错乱。**
+这是个**内核补丁**，改的是 `nuttx/arch/xtensa/src/esp32s3/esp32s3_cam.c`，不在本
+参赛仓内，因此以 patch 形式随仓提供：
+
+```
+patches/0001-nuttx-esp32s3-cam-realign-dma-on-first-vsync.patch
+```
+
+`scripts/build_hwtest.sh` 会在构建前自动应用（幂等）。成因值得记一笔：
+
+- DMA 通道由 `esp32s3_cam_start_capture()` **异步**启动，而 OV2640 此时在自由运行，
+  于是 DMA 从传感器帧的**任意相位**开始写 `fb[]`；`fb[0..P)` 是上一帧的尾部，且
+  **P 每帧都不同**。`frame_complete_worker()` 却无条件拷贝 `fb[0..fb_size)`，
+  得到的就是**圆周移位 P 个字节**的图。
+- P 为**偶数**时：配对准好，表现为**画面水平卷动一段**。
+- P 为**奇数**时：RGB565 的 2 字节配对整体错位，R/G/B 位段全乱，表现为
+  **偏蓝偏绿的彩色纹样**，而且每帧形态都不同。
+- 最棘手的是：移位后的帧**自洽且字节完整**，`bytesused` 与 `V4L2_BUF_FLAG_ERROR`
+  都检测不出来 —— 设备端、中继、日志全都看不到任何异常，只能从画面看出来。
+
+修复方式是在第一个 VSYNC 中断里从描述符链头重启 DMA 通道（先清 async FIFO），让
+新帧正好落在 `fb[0]`；VSYNC 之后有垂直消隐，重对齐在第一个有效像素到来前就已完成。
+
+> ⚠️ 该补丁**尚未合入上游**（截至提交时）。评委从零构建时脚本会自动打上；若你选择
+> 手动构建，则需要自行 `cd nuttx && patch -p1 < ../contest.../patches/0001-*.patch`。
 
 ---
 
@@ -462,7 +510,13 @@ gcc -o /tmp/t_ui tests/test_ui.c ui/lcd.c ui/lcd_icons.c ui/mimo.c \
     版本早于 nuttx 把 `spinlock_t` 改成结构体的那次提交，导致从零编译必然失败；
   - **归档丢成员** —— 链接报一串 `undefined reference`，读 `apps/Application.mk`
     发现「塞进 `libapps.a`」挂在 `.built` 标记的规则上，且 `find` 不跟随
-    `apps/packages` 这类符号链接，据此定位到清理姿势错误而非代码问题。
+    `apps/packages` 这类符号链接，据此定位到清理姿势错误而非代码问题；
+  - **画面卷动 + 颜色错乱** —— 这是个排查链很长的内核 bug。先排除应用层与中继
+    （比对两端 RGB565 取色代码，逐位相同，证明不是编码位置的问题），再由
+    「卷动量每帧都不同」这一现象反推到相机 DMA 的**异步启动相位**：DMA 在 OV2640
+    自由运行时启动，从任意相位开始写缓冲，而回调用无条件整帧拷贝。移位后的帧
+    字节完整自洽，`bytesused` 与 `V4L2_BUF_FLAG_ERROR` 都检测不出来，只能从画面
+    看出来。修复方式是在第一个 VSYNC 中断里重启 DMA 通道完成重对齐（见排障第 5 条）。
 - **文档**：本 README 的搭建步骤与排障说明由 AI 整理。
 
 完整对话日志见 `logs/` 目录。
@@ -483,6 +537,14 @@ gcc -o /tmp/t_ui tests/test_ui.c ui/lcd.c ui/lcd_icons.c ui/mimo.c \
   `protocol_version = "HTTP/1.1"` 且每个响应都带 `Content-Length`（本仓
   `tools/mimo_relay.py` 已满足）。换用 HTTP/1.0 的旧版中继会让设备每帧重连，
   退化回连接耗尽的老问题。
+- **依赖一个未合入上游的内核补丁**：相机 DMA 帧对齐（见排障第 5 条）。补丁随本仓
+  `patches/` 提供并由构建脚本自动应用，但**它改的是 nuttx 内核**，不在本参赛仓的
+  常规改动范围内，上游也尚未合入。
+- **暗光下画面噪点明显**：`esp32s3_cam.c` 驱动**只配置 ESP32-S3 的 LCD_CAM 外设**
+  （DMA / 时钟 / GPIO），**没有任何 OV2640 传感器寄存器初始化表**，传感器跑的是上电
+  默认值。Espressif 官方 esp32-camera 组件会下发一张调好的寄存器表（含降噪开关与
+  增益上限），本驱动没有，因此暗光下自动增益拉满，画面颗粒明显。演示时建议保证
+  照明；根治需要在驱动里补传感器寄存器表（内核改动，本版未做）。
 
 ## 十、许可
 
