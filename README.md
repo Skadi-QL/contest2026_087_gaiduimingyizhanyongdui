@@ -17,7 +17,8 @@ FOCUS AIoT 是一台放在书桌上的**学习专注监测终端**。它用板�
 - **网页报告**：设备屏只有 240×240，长文本放不下 —— 完整学习报告（含 LLM 建议正文）
   在网页端呈现，设备屏只提示网址。
 - **编码卸载**：设备端不做 JPEG 编码（会占用 8KB 栈帧 + 230KB 缓冲 + 密集浮点），
-  只上传降采样后的原始 RGB565，编码由服务器完成 —— 把算力留给采集与交互。
+  只上传**全尺寸**原始 RGB565（不编码也不降采样，保住小目标细节），编码由服务器
+  完成 —— 把算力留给采集与交互。
 - **全链路可复现**：视觉模型、中转服务器、内网穿透、固件编译烧录，本文档给出从零步骤。
 
 ## 二、选题方向
@@ -34,9 +35,9 @@ FOCUS AIoT 是一台放在书桌上的**学习专注监测终端**。它用板�
 ┌──────────────┐  ① RGB565 采集 (320×240)
 │ ESP32-S3-EYE │──────────────┐
 │   openvela   │              ▼
-│              │       ② 2× 降采样 → 160×120 RGB565 (37.5KB)
+│              │       ② 全尺寸 RGB565 (320×240, 150KB) — 不编码不降采样
 │ 摄像头/LCD/  │              ▼
-│ 按键/LED     │       ③ HTTP POST base64 图 (~51KB)
+│ 按键/LED     │       ③ HTTP POST base64 图 (~200KB, 复用长连接)
 └──────┬───────┘              ▼
        │              ┌─────────────────────┐
        │              │  中转服务器(公网)    │
@@ -61,9 +62,18 @@ FOCUS AIoT 是一台放在书桌上的**学习专注监测终端**。它用板�
 
 1. **编码放在服务端**：设备端做 JPEG 编码（TinyJPEG）会占用 8KB 栈帧、230KB 缓冲并做
    密集浮点运算，实测会触发 openvela 在 ESP32-S3 上的稳定性问题。改为设备只上传
-   **降采样后的原始 RGB565**，由服务器用 PIL 转 JPEG —— 设备端零编码负担。
+   **原始 RGB565**，由服务器用 PIL 转 JPEG —— 设备端零编码负担。
+   分辨率保持**全尺寸 320×240**：曾经试过 2× 降采样到 160×120 把传输量压到 1/4，
+   但手机这类小目标细节丢失后识别率明显下降，于是改回全尺寸，传输压力由
+   **复用长连接 + 加大 TCP/IOB 缓冲**解决（见第 3 点）。
 2. **固件没有 TLS 栈**，无法直连 HTTPS 云端 API；视觉模型需要 GPU，跑在 PC 上。
    因此由中转服务器做协议转换与转发，并顺带提供网页报告。
+3. **每帧复用同一条 TCP 连接**：感知约 5s 一帧，全尺寸帧体 base64 后约 200KB。
+   若每帧都新建/关闭连接，建连速率远超 TIME_WAIT 的回收速率，约 10 帧后 nuttx 的
+   TCP/IOB 池见底，`connect` 直接失败（`FOCUS_ERR_NET_DISCONN` = -20）。因此设备端
+   保持 keep-alive 长连接、响应按 `Content-Length` 读满即返回；中继侧切到 HTTP/1.1
+   配合。同时把 `CONFIG_NET_SEND_BUFSIZE` 调到 64KB、`CONFIG_IOB_NBUFFERS` 调到 512
+   留足余量 —— 注意这是**加大缓冲**，不是靠减数据。
 
 ## 四、目录结构
 
@@ -73,7 +83,7 @@ contest2026_087_gaiduimingyizhanyongdui/
 │  ├─ api/                   # 团队冻结的跨模块接口
 │  ├─ core/                  # 状态机 FSM、会话统计、图像编码、串口链路
 │  │  ├─ state_machine.c     #   4 状态：IDLE/MODE_SELECT/MONITORING/REPORT
-│  │  ├─ rgb565_jpeg.c       #   2× 降采样 + TinyJPEG 编码（服务端编码模式的备用）
+│  │  ├─ rgb565_jpeg.c       #   TinyJPEG 编码（仅未开 RAW_RGB 时的备用路径）
 │  │  └─ serial_link.c       #   USB 串口直传（备用链路，含校验重传）
 │  ├─ perception/            # 视觉感知：JPEG → 识图服务 → observation_t（3 帧去抖）
 │  ├─ behavior/              # 行为分析：observation 时序 → study_state_t（双模式阈值）
@@ -152,6 +162,8 @@ bash packages/ai_agent/fix_esp32s3.sh &
 | `CONFIG_CONTEST2026_087_PERCEPTION_RAW_RGB` | `y` | 设备端**不做 JPEG 编码**，上传原始 RGB565，由服务器转码 |
 | `CONFIG_CONTEST2026_087_PERCEPTION_MOCK` | 未启用 | 走真实视觉模型 |
 | `CONFIG_CONTEST2026_087_{WIFI,BUTTON,CAMERA,AUDIO}_STUB` | `is not set` | 走真实驱动而非桩 |
+| `CONFIG_NET_SEND_BUFSIZE` | `65536` | 单帧约 200KB，需要足够的 TCP 发送缓冲 |
+| `CONFIG_IOB_NBUFFERS` | `512` | 配合长连接，避免约 10 帧后耗尽 IOB 池 |
 
 产物：`nuttx/nuttx.bin`
 
@@ -379,7 +391,7 @@ curl -s -m 8 http://127.0.0.1:8001/health
 [state_machine] MODE_SELECT -> MONITORING
 [cam] #1 尝试采集...
 [cam] #1 采集OK 153600B -> 预处理...            ← 320×240×2 = 153600B 原始帧
-[cam] #1 降采样 RAW RGB565 38400B -> 识图...    ← 160×120×2 = 38400B，未做编码
+[cam] #1 RAW RGB565 全尺寸 153600B -> 识图...   ← 320×240×2 = 153600B，未做编码
 [percep] 识图 HTTP OK, resp=HTTP/1.0 200 OK
 [percep] 识图 person=1 phone=1 inhand=1 pitch=0.0 motion=1.00 conf=0.6x
 ```
@@ -439,7 +451,11 @@ gcc -o /tmp/t_ui tests/test_ui.c ui/lcd.c ui/lcd_icons.c ui/mimo.c \
   - **摄像头第 2 帧起采集失败** —— 读内核 `v4l2_cap.c` 发现 RING 模式判据为
     `vbuf_top != vbuf_next`，未消费容器残留导致 `-ENOMEM`；
   - **大图上传压垮 WiFi** —— 把崩溃栈解析到 `esf_buf_alloc_dynamic` / `up_irq_restore`，
-    定位为请求体过大，据此引入降采样与缓冲调整；
+    定位为请求体过大；先以 2× 降采样把 200KB 压到 50KB 绕过，但真机发现识别率
+    明显下降（手机是小目标），于是改为**恢复全尺寸 + 消灭连接 churn**：定位到
+    `wifi_esp32.c` 每帧 `socket/connect/close` 一次，约 10 帧后耗尽 nuttx 的
+    TCP/IOB 池、`connect` 返回 `-20`，据此改为 keep-alive 长连接 + 按
+    `Content-Length` 读响应，并调大 `NET_SEND_BUFSIZE` / `IOB_NBUFFERS`；
   - **构建链路"自毁"** —— 构建产物全量消失，逐层追到 `configure.sh -e` 的
     distclean 分支，再定位到 `esp32s3/Make.defs` 的
     `distclean:: $(call DELDIR, chip/esp-hal-3rdparty)`；顺带查明 ESP HAL 钉住的
@@ -457,10 +473,16 @@ gcc -o /tmp/t_ui tests/test_ui.c ui/lcd.c ui/lcd_icons.c ui/mimo.c \
   功能不受影响。
 - **视觉模型建议 GPU**：CPU 推理会明显变慢，建议用带 NVIDIA GPU 的机器。
 - **链路依赖**：运行时本机的视觉模型服务与 `frpc` 需保持运行，否则识图失败。
-- **传输量权衡**：设备上传降采样后的原始 RGB565（约 51KB base64）。若进一步增大
-  分辨率会导致传输量上升，在 `NET_SEND_BUFSIZE=16KB` 的默认配置下可能耗尽 TCP
-  连接资源（表现为 `connect` 失败）。如需更高分辨率，建议同时调大
-  `CONFIG_NET_SEND_BUFSIZE` 与 `CONFIG_IOB_NBUFFERS`。
+- **传输量**：设备上传**全尺寸**原始 RGB565（320×240，base64 后约 200KB/帧，
+  约 5s 一帧）。这是刻意的取舍 —— 降到 160×120 能把传输量减到 1/4，但手机这类
+  小目标的细节会丢失，实测识别率明显下降。传输压力改由**每帧复用同一条 TCP 长
+  连接** + 调大 `CONFIG_NET_SEND_BUFSIZE`(64KB) / `CONFIG_IOB_NBUFFERS`(512) 承担。
+  若改回 JPEG 上传（关掉 `PERCEPTION_RAW_RGB`）或进一步增大分辨率，需重新评估这
+  两个缓冲值，否则可能重新出现 `connect` 失败（`FOCUS_ERR_NET_DISCONN` = -20）。
+- **中继必须同步升级**：设备端靠 HTTP keep-alive 复用连接，中继侧需为
+  `protocol_version = "HTTP/1.1"` 且每个响应都带 `Content-Length`（本仓
+  `tools/mimo_relay.py` 已满足）。换用 HTTP/1.0 的旧版中继会让设备每帧重连，
+  退化回连接耗尽的老问题。
 
 ## 十、许可
 

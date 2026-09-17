@@ -38,11 +38,15 @@
 #include "../core/serial_link.h"
 
 /* 上传图像的 MIME: 默认 JPEG; 打开 PERCEPTION_RAW_RGB 则直接上传 RGB565
- * 原始帧 (设备端不做 JPEG 编码, 由中继转换) —— 用于验证"崩溃是否与
- * 设备端编码有关"。注意: 320x240 RGB565 原始帧 base64 后约 205KB,
- * 是 JPEG 的 7.7 倍, 传输压力显著增大。 */
+ * 原始帧 (设备端不做 JPEG 编码, 由中继转换)。
+ *
+ * 这里是**全尺寸 320x240**: 降采样到 160x120 会让手机这类小目标丢失细节,
+ * 明显拉低识别率, 所以分辨率不降。全尺寸 base64 后约 205KB, 传输压力靠
+ * 复用长连接 + 加大 TCP/IOB 缓冲解决 (见 hardware/wifi_esp32.c 的
+ * wifi_http_post 与 hwtest/defconfig), 而不是靠减数据。
+ * 中继侧按 mime 里的分辨率转码, 改这里无需同步改中继。 */
 #ifdef PERCEPTION_RAW_RGB
-#  define IMG_DATA_URL   "data:image/x-rgb565-160x120;base64,"
+#  define IMG_DATA_URL   "data:image/x-rgb565-320x240;base64,"
 #else
 #  define IMG_DATA_URL   "data:image/jpeg;base64,"
 #endif

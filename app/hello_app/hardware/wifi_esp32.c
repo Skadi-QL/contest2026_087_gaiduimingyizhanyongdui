@@ -43,10 +43,10 @@
 #define HTTP_SEND_CHUNK   2048
 #define HTTP_SEND_GAP_US  2000
 
-/* Bound this connection's TCP backlog, independently of the system-wide
- * 128 KiB default.  This is pressure mitigation, not a proven kernel fix.
+/* 本连接的 TCP 发送缓冲。帧体约 205KB, 是系统默认(CONFIG_NET_SEND_BUFSIZE)
+ * 的十几倍; 给足缓冲可以减少 send 阻塞轮次。上限仍受全局配置约束。
  */
-#define HTTP_SNDBUF_SIZE  8192
+#define HTTP_SNDBUF_SIZE  32768
 
 static int http_write_chunk(void *ctx, const char *data, size_t length)
 {
@@ -251,9 +251,205 @@ static int parse_url(const char *url, char *host, size_t hostlen,
 }
 
 /****************************************************************************
+ * 长连接 (HTTP keep-alive)
+ *
+ * 感知每 ~5s 上传一帧, 帧体(原始 RGB565, 320x240) base64 后约 205KB。
+ * 若每帧都 socket/connect/send/close:
+ *   - 205KB 是 TCP 发送缓冲(CONFIG_NET_SEND_BUFSIZE)的十几倍;
+ *   - 连接建立的速率又远快于 TIME_WAIT 回收;
+ * 两者叠加, 约 10 帧后 nuttx 的 TCP/IOB 池见底, connect 直接失败 →
+ * FOCUS_ERR_NET_DISCONN(-20)。
+ *
+ * 因此整局复用同一条 TCP 连接: 请求带 Connection: keep-alive, 响应按
+ * Content-Length 读满即返回 (keep-alive 下对端不会关连接, 不能再沿用
+ * "读到对端关闭"来定界)。任何一步出错就丢弃连接, 下次调用重建。
+ *
+ * 线程约定: wifi_http_post 只从主循环调用(感知 / 报告上报), 单线程,
+ * 故这些静态量无需加锁。
+ ****************************************************************************/
+
+static int      g_http_sock = -1;
+static char     g_http_host[64];
+static uint16_t g_http_port;
+
+static void http_conn_drop(void)
+{
+  if (g_http_sock >= 0)
+    {
+      close(g_http_sock);
+      g_http_sock = -1;
+    }
+
+  g_http_host[0] = '\0';
+  g_http_port = 0;
+}
+
+/* 取一条到 host:port 的可用连接; 已有同目标的连接就直接复用。
+ * 失败返回 -1 (由调用方决定是否重试)。 */
+static int http_conn_get(const char *host, uint16_t port)
+{
+  struct sockaddr_in addr;
+  struct timeval tv;
+  struct hostent *he;
+  int sndbuf = HTTP_SNDBUF_SIZE;
+  int sock;
+
+  if (g_http_sock >= 0 && g_http_port == port &&
+      strcmp(g_http_host, host) == 0)
+    {
+      return g_http_sock;
+    }
+
+  http_conn_drop();
+
+  he = gethostbyname(host);
+  if (he == NULL)
+    {
+      return -1;
+    }
+
+  sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0)
+    {
+      return -1;
+    }
+
+  tv.tv_sec = HTTP_TIMEOUT_SEC;
+  tv.tv_usec = 0;
+  if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
+      setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0 ||
+      setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0)
+    {
+      printf("[wifi] HTTP socket configuration failed errno=%d\n", errno);
+      close(sock);
+      return -1;
+    }
+
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  memcpy(&addr.sin_addr, he->h_addr, he->h_length);
+
+  if (connect(sock, (FAR struct sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+      close(sock);
+      return -1;
+    }
+
+  g_http_sock = sock;
+  snprintf(g_http_host, sizeof(g_http_host), "%s", host);
+  g_http_port = port;
+  return sock;
+}
+
+/* 服务端是否要求用完即关 (Connection: close)。 */
+static bool http_wants_close(const char *resp)
+{
+  return strstr(resp, "Connection: close") != NULL ||
+         strstr(resp, "connection: close") != NULL;
+}
+
+/****************************************************************************
+ * 读一个完整 HTTP 响应 (响应头 + 响应体) 到 resp。
+ *
+ * keep-alive 下不能靠"读到对端关闭"定界, 必须按 Content-Length 读满。
+ * 返回: >0 = 写入 resp 的字节数; 0 = 对端已关闭; <0 = 出错/头不完整。
+ ****************************************************************************/
+static int http_read_response(int sock, char *resp, size_t maxlen)
+{
+  char hdr[1024];
+  size_t hlen = 0;
+  size_t hdr_bytes;
+  size_t body_have;
+  size_t body_need = (size_t)-1;   /* (size_t)-1 = 未知, 退化为读到关闭 */
+  size_t n;
+  char *head_end;
+  const char *cl;
+  int r;
+
+  /* 1. 读响应头 */
+  while (hlen < sizeof(hdr) - 1)
+    {
+      r = recv(sock, hdr + hlen, (sizeof(hdr) - 1) - hlen, 0);
+      if (r <= 0)
+        {
+          return (hlen > 0) ? -1 : r;
+        }
+
+      hlen += (size_t)r;
+      hdr[hlen] = '\0';
+      if (strstr(hdr, "\r\n\r\n") != NULL)
+        {
+          break;
+        }
+    }
+
+  head_end = strstr(hdr, "\r\n\r\n");
+  if (head_end == NULL)
+    {
+      return -1;                   /* 头不完整或超长 */
+    }
+
+  hdr_bytes = (size_t)(head_end - hdr) + 4;
+
+  /* 2. 解析 Content-Length */
+  cl = strstr(hdr, "Content-Length:");
+  if (cl == NULL)
+    {
+      cl = strstr(hdr, "content-length:");
+    }
+
+  if (cl != NULL)
+    {
+      body_need = (size_t)atoi(cl + strlen("Content-Length:"));
+    }
+
+  /* 3. 头部搬进 resp (调用方按 \r\n\r\n 跳过头部, 保持原有约定) */
+  if (hdr_bytes >= maxlen)
+    {
+      return -1;
+    }
+
+  memcpy(resp, hdr, hdr_bytes);
+  n = hdr_bytes;
+
+  body_have = hlen - hdr_bytes;
+  if (body_have > maxlen - 1 - n)
+    {
+      return -1;                   /* 装不下就必须丢弃连接, 见调用方 */
+    }
+
+  if (body_have > 0)
+    {
+      memcpy(resp + n, hdr + hdr_bytes, body_have);
+      n += body_have;
+    }
+
+  /* 4. 按 Content-Length 补满剩余响应体 */
+  while (n < maxlen - 1)
+    {
+      if (body_need != (size_t)-1 && (n - hdr_bytes) >= body_need)
+        {
+          break;
+        }
+
+      r = recv(sock, resp + n, maxlen - 1 - n, 0);
+      if (r <= 0)
+        {
+          break;
+        }
+
+      n += (size_t)r;
+    }
+
+  resp[n] = '\0';
+  return (int)n;
+}
+
+/****************************************************************************
  * Name: wifi_http_post
  *
- * HTTP POST (阻塞), 超时 3s + 重试 1 次, 总计 ≤6s。
+ * HTTP POST (阻塞, 复用长连接)。超时 HTTP_TIMEOUT_SEC, 失败重连重发 1 次。
  * 返回: 0=成功, FOCUS_ERR_NET_DISCONN=连接失败, FOCUS_ERR_TIMEOUT=超时。
  ****************************************************************************/
 int wifi_http_post(const char *url, const char *body,
@@ -277,45 +473,15 @@ int wifi_http_post(const char *url, const char *body,
 
   for (attempt = 0; attempt < 2; attempt++)
     {
-      struct sockaddr_in addr;
-      struct timeval tv;
-      struct hostent *he;
       int sock;
       int req_len;
       int n;
-      int sndbuf = HTTP_SNDBUF_SIZE;
 
-      he = gethostbyname(host);
-      if (he == NULL)
-        {
-          return FOCUS_ERR_NET_DNS;
-        }
-
-      sock = socket(AF_INET, SOCK_STREAM, 0);
+      /* 复用长连接: 目标没变就直接拿已建好的 socket, 只有断开/换目标才重连 */
+      sock = http_conn_get(host, port);
       if (sock < 0)
         {
-          return FOCUS_ERR_NET_DISCONN;
-        }
-
-      tv.tv_sec = HTTP_TIMEOUT_SEC;
-      tv.tv_usec = 0;
-      if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
-          setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0 ||
-          setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0)
-        {
-          printf("[wifi] HTTP socket configuration failed errno=%d\n", errno);
-          close(sock);
-          return FOCUS_ERR_IO;
-        }
-
-      memset(&addr, 0, sizeof(addr));
-      addr.sin_family = AF_INET;
-      addr.sin_port = htons(port);
-      memcpy(&addr.sin_addr, he->h_addr, he->h_length);
-
-      if (connect(sock, (FAR struct sockaddr *)&addr, sizeof(addr)) < 0)
-        {
-          close(sock);
+          http_conn_drop();
           if (attempt == 0)
             {
               continue;
@@ -339,11 +505,11 @@ int wifi_http_post(const char *url, const char *body,
                            "Content-Type: application/json\r\n"
                            "%s"
                            "Content-Length: %d\r\n"
-                           "Connection: close\r\n\r\n",
+                           "Connection: keep-alive\r\n\r\n",
                            path, host, auth_hdr, (int)strlen(body));
         if (req_len < 0 || (size_t)req_len >= sizeof(req))
           {
-            close(sock);
+            http_conn_drop();
             return FOCUS_ERR_PARAM;
           }
 
@@ -353,7 +519,7 @@ int wifi_http_post(const char *url, const char *body,
                           http_write_chunk, http_pause_tx) < 0)
           {
             int send_errno = errno;
-            close(sock);
+            http_conn_drop();
             if (send_errno == EAGAIN || send_errno == EWOULDBLOCK)
               {
                 return FOCUS_ERR_TIMEOUT;
@@ -367,37 +533,26 @@ int wifi_http_post(const char *url, const char *body,
 
       }
 
-      /* 循环读响应直至连接关闭 (Connection: close), 避免大响应被截断 */
-      n = 0;
-      while (n < (int)maxlen - 1)
-        {
-          int r = recv(sock, resp + n, maxlen - 1 - n, 0);
-          if (r <= 0)
-            {
-              break;
-            }
-
-          n += r;
-        }
-
-      close(sock);
-
+      /* 按 Content-Length 读满整个响应 (keep-alive 下对端不会关连接) */
+      n = http_read_response(sock, resp, maxlen);
       if (n > 0)
         {
-          resp[n] = '\0';
+          /* 服务端可能主动要求关闭 (例如空闲超时), 那就别留着这条连接 */
+          if (http_wants_close(resp))
+            {
+              http_conn_drop();
+            }
           return FOCUS_OK;
         }
 
-      if (n == 0)
-        {
-          return FOCUS_ERR_NET_DISCONN;
-        }
-
-      /* n < 0: 超时(EAGAIN/EWOULDBLOCK) 或错误 */
+      /* 连接已不可用: 丢弃后重连重发一次 */
+      http_conn_drop();
       if (attempt == 0)
         {
           continue;
         }
+
+      return (n == 0) ? FOCUS_ERR_NET_DISCONN : FOCUS_ERR_TIMEOUT;
     }
 
   return FOCUS_ERR_TIMEOUT;
