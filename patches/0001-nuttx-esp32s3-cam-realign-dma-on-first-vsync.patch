@@ -1,0 +1,112 @@
+From f7187cb70229cb65fd39ae55265a8e9a3ddaf9ce Mon Sep 17 00:00:00 2001
+Subject: [PATCH] esp32s3/cam: realign DMA to the frame start on the first VSYNC
+
+本补丁为 FOCUS AIoT 参赛作品所必需, 但它改的是 nuttx 内核驱动, 不在本
+参赛仓内, 故以 patch 形式随仓提供, 由 scripts/build_hwtest.sh 在构建前
+自动应用 (幂等)。上游尚未合入。
+
+现象: 画面水平卷动一段, 且卷动量每帧不同; 当卷动量是奇数个字节时,
+      RGB565 的 2 字节配对整体错位, 表现为偏蓝偏绿的彩色纹样。
+原因: DMA 通道由 esp32s3_cam_start_capture() 异步启动, 而 OV2640 此时
+      在自由运行, 于是 DMA 从传感器帧的任意相位开始写 fb[], fb[0..P)
+      是上一帧的尾部, P 每次采集都不同。frame_complete_worker() 却
+      无条件拷贝 fb[0..fb_size), 得到的就是圆周移位 P 字节的图。
+      移位后的帧自洽且字节完整, bytesused 与 V4L2_BUF_FLAG_ERROR 都
+      检测不出来。
+修复: 在第一个 VSYNC 中断里从描述符链头重启 DMA 通道 (先清 async
+      FIFO), 让新帧正好落在 fb[0]。VSYNC 之后有垂直消隐, 重对齐在
+      第一个有效像素到来前就已完成。
+
+---
+diff --git a/arch/xtensa/src/esp32s3/esp32s3_cam.c b/arch/xtensa/src/esp32s3/esp32s3_cam.c
+index 8c4e9feac63..595861ea208 100644
+--- a/arch/xtensa/src/esp32s3/esp32s3_cam.c
++++ b/arch/xtensa/src/esp32s3/esp32s3_cam.c
+@@ -253,9 +253,62 @@ static int IRAM_ATTR cam_interrupt(int irq, void *context, void *arg)
+ 
+           if (priv->vsync_cnt == 1)
+             {
+-              /* Frame capture just started, DMA is now receiving data.
+-               * Nothing to do here — wait for next VSYNC.
++              /* First VSYNC = start of frame.  Realign the DMA write pointer
++               * to the head of the descriptor chain.
++               *
++               * The channel is started asynchronously by
++               * esp32s3_cam_start_capture() while the OV2640 is free running
++               * (the sensor's own start_capture is a no-op), so the DMA
++               * begins filling fb[] at an arbitrary phase of the sensor
++               * frame.  fb[0..P) is therefore the tail of the *previous*
++               * frame, with P varying from one capture to the next, and
++               * frame_complete_worker() copying fb[0..fb_size) yields an
++               * image that is circularly shifted by P: the picture "rolls",
++               * by a different amount every frame.
++               *
++               * Restarting the channel here makes the incoming frame land at
++               * fb[0] exactly.  There is vertical blanking after VSYNC, so
++               * this completes well before the first active pixel.
+                */
++
++              uint32_t regval;
++
++              SET_GDMA_CH_BITS(DMA_IN_LINK_CH0_REG, priv->dma_channel,
++                               DMA_INLINK_STOP_CH0_M);
++
++              /* Bounded wait for DMA to park */
++
++              for (int tries = 1000; tries > 0; tries--)
++                {
++                  uint32_t regaddr = DMA_IN_LINK_CH0_REG +
++                      priv->dma_channel * GDMA_REG_OFFSET;
++                  if (getreg32(regaddr) & DMA_INLINK_PARK_CH0)
++                    {
++                      break;
++                    }
++                }
++
++              /* Drop whatever the async FIFO still holds from the partial
++               * frame, otherwise those stale bytes are prepended to the new
++               * frame and leave a residual shift.
++               */
++
++              regval = getreg32(LCD_CAM_CAM_CTRL1_REG);
++              regval |= LCD_CAM_CAM_AFIFO_RESET_M;
++              putreg32(regval, LCD_CAM_CAM_CTRL1_REG);
++              regval &= ~LCD_CAM_CAM_AFIFO_RESET_M;
++              putreg32(regval, LCD_CAM_CAM_CTRL1_REG);
++
++              /* Rebuild the descriptors (the DMA cleared their OWN bits) and
++               * restart the channel from the head of the chain.
++               */
++
++              esp32s3_cam_setup_dma(priv);
++              esp32s3_dma_load(priv->dmadesc, priv->dma_channel, false);
++              esp32s3_dma_enable(priv->dma_channel, false);
++
++              priv->fb_pos = 0;
++              priv->dma_received = 0;
+             }
+           else if (priv->vsync_cnt >= 2 && priv->cb)
+             {
+@@ -757,7 +810,12 @@ static int esp32s3_cam_start_capture(struct imgdata_s *data,
+   regval |= LCD_CAM_CAM_START_M;
+   putreg32(regval, LCD_CAM_CAM_CTRL1_REG);
+ 
+-  priv->capturing = true;
++  /* The GPIO matrix is toggled below to inject an artificial VSYNC edge and
++   * kick the CAM module into recognising a frame boundary.  Keep capturing
++   * false while doing so: with capturing already true, that injected edge
++   * would be counted as the first VSYNC and the realignment in cam_interrupt()
++   * would run one frame too early.
++   */
+ 
+   esp32s3_gpio_matrix_in(CONFIG_ESP32S3_CAM_VSYNC_PIN,
+                          CAM_V_SYNC_IDX, false);
+@@ -765,6 +823,8 @@ static int esp32s3_cam_start_capture(struct imgdata_s *data,
+   esp32s3_gpio_matrix_in(CONFIG_ESP32S3_CAM_VSYNC_PIN,
+                          CAM_V_SYNC_IDX, true);
+ 
++  priv->capturing = true;
++
+   return OK;
+ }
+ 
